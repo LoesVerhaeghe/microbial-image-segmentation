@@ -57,21 +57,45 @@ class SegmentationDataset(Dataset):
 ##  horizontal and vertical flipping and rotation only to train dataset
 # Normalisation step was not specified in PCM approach, but added here
 train_transform = A.Compose([
-    A.Resize(1024, 1024),
+    # ---- scale robustness ----
+    A.OneOf([
+        A.RandomScale(scale_limit=(-0.6, -0.2)),
+        A.RandomScale(scale_limit=(0.0, 0.3)),
+    ], p=0.7),
+
+    A.PadIfNeeded(min_height=700, min_width=700),
+    A.RandomCrop(512, 512),
+
+    # ---- geometry ----
     A.HorizontalFlip(p=0.5),
     A.VerticalFlip(p=0.5),
-    #A.Rotate(limit=30, p=0.5),  
-    A.Normalize(mean=(0.485, 0.456, 0.406),
-                std=(0.229, 0.224, 0.225)),
+    A.RandomRotate90(p=0.5),
+    A.Affine(scale=(0.9,1.1), rotate=(-10,10), shear=(-5,5), p=0.3),
+
+    # ---- microscopy realism ----
+    A.OneOf([
+        A.GaussianBlur(blur_limit=5),
+        A.MotionBlur(blur_limit=3),
+    ], p=0.4),
+
+    A.RandomBrightnessContrast(p=0.4),
+    A.RandomGamma(p=0.3),
+
+    # ---- slight resolution degradation ----
+    A.Downscale(scale_range=[0.4,0.8], p=0.4),
+
+    A.Normalize(mean=(0.485,0.456,0.406),
+                std=(0.229,0.224,0.225)),
     ToTensorV2()
 ], additional_targets={'mask': 'mask'})
 
 val_transform = A.Compose([
-    A.Resize(1024, 1024),
+    A.CenterCrop(512, 512),
     A.Normalize(mean=(0.485, 0.456, 0.406),
                 std=(0.229, 0.224, 0.225)),
     ToTensorV2(),
 ], additional_targets={'mask': 'mask'})
+
 
 ## load dataset
 image_dir='data/paper_PCM/train/images'
@@ -90,15 +114,11 @@ split = int(0.90 * dataset_size)
 train_indices = indices[:split]
 val_indices = indices[split:]
 
-
-train_indices = indices[:split]
-val_indices = indices[split:]
-
 train_dataset = Subset(train_dataset_full, train_indices)
 val_dataset = Subset(val_dataset_full, val_indices)
 
-train_loader = DataLoader(train_dataset, batch_size=2, num_workers=1, shuffle=True, pin_memory=True, drop_last=True)
-val_loader = DataLoader(val_dataset, batch_size=2,  num_workers=1, shuffle=False, pin_memory=True)
+train_loader = DataLoader(train_dataset, batch_size=8, num_workers=2, shuffle=True, pin_memory=True, drop_last=True)
+val_loader = DataLoader(val_dataset, batch_size=8,  num_workers=2, shuffle=False, pin_memory=True)
 
 ## load model
 num_classes = 3
@@ -118,35 +138,40 @@ torch.set_num_threads(4)
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 torch.manual_seed(25)
 
-# The multiclass lovasz_softmax expect class probabilities (the maximum scoring category is predicted). First use a Softmax layer on the unnormalized scores.
+# The multiclass lovasz_softmax expect class probabilities (the maximum scoring category is predicted). 
+# First use a Softmax layer on the unnormalized scores.
 class MixedLoss(nn.Module):
-    def __init__(self, coef_ce=0.35, coef_lovasz=0.65):
+    def __init__(self, coef_ce=0.3, coef_lovasz=0.4, coef_dice=0.3, device=device):
         super().__init__()
-        self.ce = nn.CrossEntropyLoss()
+        class_weights = torch.tensor([0.15, 0.35, 0.5], dtype=torch.float32).to(device)
+        self.ce = nn.CrossEntropyLoss(weight=class_weights)
+        self.dice = smp.losses.DiceLoss(mode="multiclass")
         self.coef_ce = coef_ce
         self.coef_lovasz = coef_lovasz
+        self.coef_dice=coef_dice
 
     def forward(self, logits, labels):
         # logits: [B,C,H,W], labels: [B,H,W]
         ce_loss = self.ce(logits, labels)
-        lovasz_loss = L.lovasz_softmax(logits, labels)  # <- call here
-        return self.coef_ce * ce_loss + self.coef_lovasz * lovasz_loss
+        probs = torch.softmax(logits, dim=1)
+        lovasz_loss = L.lovasz_softmax(probs, labels)  
+        dice_loss = self.dice(logits, labels)
+        return self.coef_ce * ce_loss + self.coef_lovasz * lovasz_loss + self.coef_dice*dice_loss
 
 criterion = MixedLoss()
 
 # Optimizer and LR Scheduler
 optimizer = torch.optim.AdamW(model.parameters(), lr=6e-5, betas=(0.9,0.999), weight_decay=0.01)
 
-num_epochs = 60000
+num_epochs = 50
 
-scheduler = torch.optim.lr_scheduler.PolynomialLR(
+scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
     optimizer,
-    total_iters=num_epochs,
-    power=1.0,      
-    last_epoch=-1   
+    factor=0.5,
+    patience=5
 )
 
-patience = 8
+patience = 5
 skip_epoch_stats= False
 plot_losses_path='outputs/losses'
 save_model_path = 'outputs/trained_SegFormer.pt'
@@ -173,9 +198,6 @@ for epoch in range(num_epochs):
         optimizer.step()
         
         train_loss += loss.item()
-        
-    # update learning rate using scheduler
-    scheduler.step()
 
     avg_train_loss = train_loss / len(train_loader) # train loss for this epoch
     log_dict['train_loss_per_epoch'].append(avg_train_loss)
@@ -202,6 +224,8 @@ for epoch in range(num_epochs):
             if patience_counter >= patience:
                 print(f"Early stopping at epoch {epoch + 1}. Best validation loss: {best_val_loss:.4f}")
                 break  # Stop training
+        # update learning rate using scheduler
+        scheduler.step(val_loss)
 
     if not skip_epoch_stats:
         print(f'Epoch [{epoch + 1}/{num_epochs}] | Time: {((time.time() - epoch_start_time)/60):.2f} min')
@@ -301,6 +325,7 @@ with torch.no_grad():
         plt.axis('off')
 
         plt.savefig(f'outputs/example_masks/fig{idx}', dpi=300)
+        plt.close()
         # Optional: break after a few images
         if idx >= 10:
             break
