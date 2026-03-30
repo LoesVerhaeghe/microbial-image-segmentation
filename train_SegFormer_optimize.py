@@ -1,7 +1,5 @@
 '''
-This code finetunes the SegFormer model from segmentation_models_pytorch. 
-The architecture and training choices (e.g. loss function) are based on this github repo: https://github.com/SYUCT-InfoEng/PCM_data/tree/main
-Some adaptation were made to their approach (explained in comments)
+This code finetunes the SegFormer model from Huggingface. 
 '''
 
 import torch
@@ -123,9 +121,9 @@ val_loader = DataLoader(val_dataset, batch_size=8,  num_workers=2, shuffle=False
 ## load model
 num_classes = 3
 model = smp.Segformer(
-    encoder_name="mit_b3",             # the backbone: mit_b3 = SegFormer B3
+    encoder_name="mit_b1",             # the backbone: mit_b3 = SegFormer B3
     encoder_weights='imagenet',   
-    decoder_segmentation_channels=512, # channels in decoder, can tune
+    decoder_segmentation_channels=128, # channels in decoder, can tune
     in_channels=3,                      
     classes=num_classes,               
     activation=None,                   
@@ -138,25 +136,21 @@ torch.set_num_threads(4)
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 torch.manual_seed(25)
 
-# The multiclass lovasz_softmax expect class probabilities (the maximum scoring category is predicted). 
 # First use a Softmax layer on the unnormalized scores.
 class MixedLoss(nn.Module):
-    def __init__(self, coef_ce=0.3, coef_lovasz=0.4, coef_dice=0.3, device=device):
+    def __init__(self, coef_ce=0.3, coef_dice=0.3, device=device):
         super().__init__()
-        class_weights = torch.tensor([0.15, 0.35, 0.5], dtype=torch.float32).to(device)
+        class_weights = torch.tensor([0.05, 0.35, 0.6], dtype=torch.float32).to(device)
         self.ce = nn.CrossEntropyLoss(weight=class_weights)
         self.dice = smp.losses.DiceLoss(mode="multiclass")
         self.coef_ce = coef_ce
-        self.coef_lovasz = coef_lovasz
         self.coef_dice=coef_dice
 
     def forward(self, logits, labels):
         # logits: [B,C,H,W], labels: [B,H,W]
         ce_loss = self.ce(logits, labels)
-        probs = torch.softmax(logits, dim=1)
-        lovasz_loss = L.lovasz_softmax(probs, labels)  
         dice_loss = self.dice(logits, labels)
-        return self.coef_ce * ce_loss + self.coef_lovasz * lovasz_loss + self.coef_dice*dice_loss
+        return self.coef_ce * ce_loss  + self.coef_dice*dice_loss
 
 criterion = MixedLoss()
 

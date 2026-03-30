@@ -66,7 +66,8 @@ val_transform = A.Compose([
     A.Normalize(mean=(0.485, 0.456, 0.406),
                 std=(0.229, 0.224, 0.225)),
     ToTensorV2(),
-])
+], additional_targets={'mask': 'mask'})
+
 
 def predict_full_image(model, image_np, device, tile_size=512, overlap=128, num_classes=3):
     model.eval()
@@ -139,13 +140,14 @@ def decode_mask(mask, COLORS):
     return rgb
 
 import random
-n_samples = 10
-random.seed(32)  # for reproducibility
+n_samples = 20
+random.seed(47)  # for reproducibility
 sample_indices = random.sample(range(len(dataset)), n_samples)
 
 #plot some infered mask for visual evaluation
 with torch.no_grad():
     for idx in sample_indices:
+        print('idx: ', idx)
         image_path = dataset.image_paths[idx]
         image = np.array(Image.open(image_path).convert("RGB"))
 
@@ -175,41 +177,52 @@ with torch.no_grad():
 
         plt.savefig(f'outputs/example_masks_pilEAUte/fig{idx}')
 
+# val_transform_512x512 = A.Compose([
+#     A.CenterCrop(512, 512),
+#     A.Normalize(mean=(0.485, 0.456, 0.406),
+#                 std=(0.229, 0.224, 0.225)),
+#     ToTensorV2(),
+# ], additional_targets={'mask': 'mask'})
 
-#save some images to later finetune them
-with torch.no_grad():
-    for idx in sample_indices:
-        image_path = dataset.image_paths[idx]
-        image = np.array(Image.open(image_path).convert("RGB"))
+# def predict_512x512_image(model, image_np, device):
+#     model.eval()
 
-        pred_np = predict_full_image(model, image, device)
-        pred_rgb = decode_mask(pred_np, COLORS)
+#     # transform
+#     augmented = val_transform_512x512(image=image_np)
+#     augmented = augmented["image"].unsqueeze(0).to(device)
 
-        # Plot original, predicted mask and overlay
-        plt.figure(figsize=(12,4), dpi=500)
-        # Overlay ground truth
-        plt.subplot(1,3,1)
-        plt.imshow(image)
-        plt.title("Image")
-        plt.axis('off')
+#     with torch.no_grad():
+#         output = model(augmented)
+#         probs = torch.softmax(output, dim=1)[0].cpu().numpy()
 
-        # Overlay predicted mask
-        plt.subplot(1,3,2)
-        plt.imshow(pred_rgb)
-        plt.title("Predicted Mask")
-        plt.axis('off')
+#     final_mask = np.argmax(probs, axis=0)
 
-        # Overlay predicted mask
-        plt.subplot(1,3,3)
-        plt.imshow(image)
-        plt.imshow(pred_rgb, alpha=0.4)
-        plt.title("Image+predicted mask")
-        plt.axis('off')
+#     return final_mask
 
-        plt.savefig(f'outputs/example_masks_pilEAUte/fig{idx}')
 
-        # pred_mask = Image.fromarray(pred_np.astype(np.uint8))
-        # pred_mask.save(f"data/pilEAUte/modeloutputs/model_output_masks/im_{idx}_masks.png")
-        # img_uint8 = (img_np * 255).astype(np.uint8)
-        # pred_img=Image.fromarray(img_uint8)
-        # pred_img.save(f"data/pilEAUte/modeloutputs/orig_images/im_{idx}.png")
+# #save some images to later finetune them
+# with torch.no_grad():
+#     for idx in sample_indices:
+#         image = dataset[idx]
+#         image = image.unsqueeze(0).to(device)
+        
+#         output = model(image)
+#         probs = torch.softmax(output, dim=1)
+#         pred_mask = torch.argmax(probs, dim=1)[0]   # [H, W]
+        
+#         # Move tensors to CPU for visualization
+#         img_np = image[0].permute(1,2,0).cpu().numpy()
+#         pred_np = pred_mask.cpu().numpy()
+        
+#         mean = np.array([0.485, 0.456, 0.406])
+#         std  = np.array([0.229, 0.224, 0.225])
+#         img_np = (img_np * std) + mean
+#         img_np = np.clip(img_np, 0, 1)
+
+#         pred_rgb = decode_mask(pred_np, COLORS)
+
+#         pred_mask = Image.fromarray(pred_np.astype(np.uint8))
+#         pred_mask.save(f"data/pilEAUte/modeloutputs/model_output_masks/im_{idx}_masks.png")
+#         img_uint8 = (img_np * 255).astype(np.uint8)
+#         pred_img=Image.fromarray(img_uint8)
+#         pred_img.save(f"data/pilEAUte/modeloutputs/orig_images/im_{idx}.png")
