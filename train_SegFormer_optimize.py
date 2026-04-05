@@ -1,6 +1,7 @@
 '''
 This code finetunes the SegFormer model 
 to segment microscopic images of activated sludge into background, filament and flocs
+it does use the PBM images
 '''
 
 import torch
@@ -72,15 +73,15 @@ train_transform = A.Compose([
 
     # ---- microscopy realism ----
     A.OneOf([
-        A.GaussianBlur(blur_limit=5),
+        A.GaussianBlur(blur_limit=3),
         A.MotionBlur(blur_limit=3),
     ], p=0.4),
 
-    A.RandomBrightnessContrast(p=0.4),
+    A.RandomBrightnessContrast(brightness_limit=(-0.1,0.1), p=0.4),
     A.RandomGamma(p=0.3),
 
     # ---- slight resolution degradation ----
-    A.Downscale(scale_range=[0.4,0.8], p=0.4),
+    A.Downscale(scale_range=[0.75,0.9], p=0.4),
 
     A.Normalize(mean=(0.485,0.456,0.406),
                 std=(0.229,0.224,0.225)),
