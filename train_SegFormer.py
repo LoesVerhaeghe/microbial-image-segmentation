@@ -13,7 +13,7 @@ from torch.utils.data import DataLoader, Dataset, Subset
 import segmentation_models_pytorch as smp
 from PIL import Image
 import os
-import lovasz_losses as L
+import archive.lovasz_losses as L
 import time
 import matplotlib.pyplot as plt
 

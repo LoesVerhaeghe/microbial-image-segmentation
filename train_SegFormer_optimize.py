@@ -1,5 +1,6 @@
 '''
-This code finetunes the SegFormer model from Huggingface. 
+This code finetunes the SegFormer model 
+to segment microscopic images of activated sludge into background, filament and flocs
 '''
 
 import torch
@@ -11,7 +12,7 @@ from torch.utils.data import DataLoader, Dataset, Subset
 import segmentation_models_pytorch as smp
 from PIL import Image
 import os
-import lovasz_losses as L
+import archive.lovasz_losses as L
 import time
 import matplotlib.pyplot as plt
 
@@ -53,7 +54,6 @@ class SegmentationDataset(Dataset):
         return image, label
 
 ##  horizontal and vertical flipping and rotation only to train dataset
-# Normalisation step was not specified in PCM approach, but added here
 train_transform = A.Compose([
     # ---- scale robustness ----
     A.OneOf([
