@@ -13,7 +13,6 @@ from torch.utils.data import DataLoader, Dataset, Subset
 import segmentation_models_pytorch as smp
 from PIL import Image
 import os
-import archive.lovasz_losses as L
 import time
 import matplotlib.pyplot as plt
 
@@ -119,6 +118,14 @@ val_dataset = Subset(val_dataset_full, val_indices)
 train_loader = DataLoader(train_dataset, batch_size=8, num_workers=2, shuffle=True, pin_memory=True, drop_last=True)
 val_loader = DataLoader(val_dataset, batch_size=8,  num_workers=2, shuffle=False, pin_memory=True)
 
+
+# Move model to GPU
+torch.cuda.set_device(3) 
+torch.set_num_threads(4)
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+torch.manual_seed(25)
+
+
 ## load model
 num_classes = 3
 model = smp.Segformer(
@@ -131,17 +138,11 @@ model = smp.Segformer(
     upsampling=4                      # final upsampling factor
 )
 
-# Move model to GPU
-torch.cuda.set_device(3) 
-torch.set_num_threads(4)
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-torch.manual_seed(25)
-
-# First use a Softmax layer on the unnormalized scores.
+#define a mixed loss fct
 class MixedLoss(nn.Module):
-    def __init__(self, coef_ce=0.3, coef_dice=0.3, device=device):
+    def __init__(self, coef_ce=0.5, coef_dice=0.5, device=device):
         super().__init__()
-        class_weights = torch.tensor([0.05, 0.35, 0.6], dtype=torch.float32).to(device)
+        class_weights = torch.tensor([0.05, 0.35, 0.6], dtype=torch.float32).to(device) # low frequency -> higher weight
         self.ce = nn.CrossEntropyLoss(weight=class_weights)
         self.dice = smp.losses.DiceLoss(mode="multiclass")
         self.coef_ce = coef_ce
@@ -151,7 +152,9 @@ class MixedLoss(nn.Module):
         # logits: [B,C,H,W], labels: [B,H,W]
         ce_loss = self.ce(logits, labels)
         dice_loss = self.dice(logits, labels)
-        return self.coef_ce * ce_loss  + self.coef_dice*dice_loss
+
+        loss = self.coef_ce * ce_loss  + self.coef_dice*dice_loss
+        return loss, ce_loss, dice_loss
 
 criterion = MixedLoss()
 
@@ -174,7 +177,12 @@ save_model_path = 'outputs/trained_SegFormer.pt'
 # --------------------------------------------------------
 # Training Loop
 model.to(device)
-log_dict = {'train_loss_per_epoch': [], 'val_loss_per_epoch': []}
+log_dict = {'train_loss_per_epoch': [], 
+            'train_ce' : [], 
+            'train_dice' : [],
+            'val_loss_per_epoch': [],
+            'val_ce' : [],
+            'val_dice' : [] }
 start_time = time.time()
 best_val_loss = float('inf')
 patience_counter = 0
@@ -183,33 +191,49 @@ for epoch in range(num_epochs):
     epoch_start_time = time.time()
     model.train()
     train_loss = 0  # Initialize epoch loss
+    train_sum_ce_loss = 0
+    train_sum_dice_loss = 0
     for images, masks in train_loader:
         images, masks = images.to(device), masks.to(device)
         
         optimizer.zero_grad()
         outputs = model(images)
-        loss = criterion(outputs, masks)       
+        loss, ce_loss, dice_loss = criterion(outputs, masks)       
         loss.backward()
         optimizer.step()
         
         train_loss += loss.item()
+        train_sum_ce_loss += ce_loss.item()
+        train_sum_dice_loss += dice_loss.item()
 
     avg_train_loss = train_loss / len(train_loader) # train loss for this epoch
+    avg_ce_loss = train_sum_ce_loss / len(train_loader)
+    avg_dice_loss = train_sum_dice_loss / len(train_loader)
     log_dict['train_loss_per_epoch'].append(avg_train_loss)
+    log_dict['train_ce'].append(avg_ce_loss)
+    log_dict['train_dice'].append(avg_dice_loss)
 
     avg_val_loss = float('nan') # Use NaN if no validation
     if val_loader is not None:
         model.eval()
         val_loss = 0
+        val_sum_ce_loss = 0
+        val_sum_dice_loss = 0
         with torch.no_grad():
             for images, masks in val_loader:
                 images, masks = images.to(device), masks.to(device)
                 outputs = model(images)
-                loss=criterion(outputs, masks)
+                loss, ce_loss, dice_loss=criterion(outputs, masks)
                 val_loss += loss.item()
+                val_sum_ce_loss += ce_loss.item()
+                val_sum_dice_loss += dice_loss.item()
 
         avg_val_loss= val_loss / len(val_loader) # val loss for this epoch
+        avg_val_ce_loss= val_sum_ce_loss / len(val_loader) # val loss for this epoch
+        avg_val_dice_loss= val_sum_dice_loss / len(val_loader) # val loss for this epoch
         log_dict['val_loss_per_epoch'].append(avg_val_loss)
+        log_dict['val_ce'].append(avg_val_ce_loss)
+        log_dict['val_dice'].append(avg_val_dice_loss)
 
         if avg_val_loss  < best_val_loss:
             best_val_loss = avg_val_loss 
@@ -235,7 +259,13 @@ for epoch in range(num_epochs):
     if plot_losses_path is not None:
         plt.figure()
         plt.plot(log_dict['train_loss_per_epoch'], '.-', label='Total train loss')
+        plt.plot(log_dict['train_ce'], '.-', label='CE train loss')
+        plt.plot(log_dict['train_dice'], '.-', label='Dice train loss')
+
         plt.plot(log_dict['val_loss_per_epoch'], '.-', label='Total val loss')
+        plt.plot(log_dict['val_ce'], '.-', label='CE val loss')
+        plt.plot(log_dict['val_dice'], '.-', label='Dice val loss')
+
         plt.xlabel('Epoch')
         plt.ylabel('Loss')
         plt.legend()
@@ -252,6 +282,9 @@ test_mask_dir='data/paper_PCM/test/labels'
 
 test_dataset = SegmentationDataset(test_image_dir, test_mask_dir, transform=val_transform)
 test_loader = DataLoader(test_dataset, batch_size=1, num_workers=1, shuffle=False, pin_memory=True, drop_last=False)
+
+save_model_path = 'outputs/trained_SegFormer.pt'
+model = torch.load(save_model_path, map_location=device)
 
 model.eval()
 
@@ -319,8 +352,8 @@ with torch.no_grad():
         plt.title("Predicted Mask")
         plt.axis('off')
 
-        plt.savefig(f'outputs/example_masks/fig{idx}', dpi=300)
+        plt.savefig(f'outputs/example_masks_PCM/fig{idx}', dpi=300)
         plt.close()
-        # Optional: break after a few images
+        # break after a few images
         if idx >= 10:
             break
