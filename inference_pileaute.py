@@ -9,27 +9,36 @@ from os import listdir
 from albumentations.pytorch import ToTensorV2
 
 
-class pilEAUteDataset(Dataset):
-    def __init__(self, image_dir, start_folder, end_folder, magnification, transform=None):
-        self.image_dir = image_dir
-        self.transform = transform
-        self.image_paths = extract_image_paths_pileaute(image_dir, start_folder=start_folder, end_folder=end_folder, magnification=magnification)
+def extract_image_paths_pileaute(path_to_folders, start_folder, end_folder, magnification=10):
+    """
+    Extract paths from all the images from the specified folder.
 
-    def __len__(self):
-        return len(self.image_paths)
+    Parameters:
+        base_folder (str): The base folder containing subfolders with images.
+        start_folder: start date from which images need to be extracted
+        end_folder: end date until which images need to be extracted
+        magnification: type of magnification (10 or 40)
 
-    def __getitem__(self, idx):
-        image_path = self.image_paths[idx]
-        image = Image.open(image_path).convert("RGB")
+    Returns:
+        all_images (list): A list of all extracted images.
+    """
+    image_folders = sorted(listdir(path_to_folders)) 
 
-        if self.transform is not None:
-            augmented = self.transform(image=np.array(image))
-            image = augmented["image"]
+    all_paths = []
 
-        # Albumentations already returns tensors if ToTensorV2 is used
-        image = image.float()
+    # Select the images from start until end date
+    selected_folders = [folder for folder in image_folders if start_folder <= folder <= end_folder]
+    selected_folders = sorted(selected_folders)
 
-        return image
+    # Save all paths from the selected folders
+    for folder in selected_folders:
+        path_to_image = f"{path_to_folders}/{folder}/basin3/{magnification}x"
+        if not os.path.exists(path_to_image):  # <- skip missing folders
+            continue
+        images_list = sorted(listdir(path_to_image))
+        for image in images_list:
+            all_paths.append(f"{path_to_image}/{image}")
+    return all_paths
 
 val_transform = A.Compose([
     A.Normalize(mean=(0.485, 0.456, 0.406),
@@ -37,8 +46,7 @@ val_transform = A.Compose([
     ToTensorV2(),
 ], additional_targets={'mask': 'mask'})
 
-
-def predict_full_image(model, image_np, device, tile_size=512, overlap=128, num_classes=3):
+def predict_full_image(model, image_np, device, val_transform=val_transform,tile_size=512, overlap=128, num_classes=3):
     model.eval()
 
     stride = tile_size - overlap
@@ -78,22 +86,6 @@ def predict_full_image(model, image_np, device, tile_size=512, overlap=128, num_
 
     return final_mask
 
-image_dir='data/pilEAUte/all_images'
-
-#load only images with new microscope
-dataset = pilEAUteDataset(image_dir, start_folder='2024-01-26', end_folder='2024-12-31', magnification=10, transform=val_transform)
-data_loader = DataLoader(dataset, batch_size=1, num_workers=1, shuffle=False, pin_memory=True, drop_last=False)
-
-torch.cuda.set_device(3) 
-torch.set_num_threads(4)
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-torch.manual_seed(25)
-
-save_model_path = 'outputs/trained_SegFormer.pt'
-model = torch.load(save_model_path, map_location=device)
-
-model.eval()
-
 COLORS = {
     0: [0, 0, 0],        # background
     1: [255, 0, 0],      # class 1 - red
@@ -108,43 +100,60 @@ def decode_mask(mask, COLORS):
         rgb[mask == cls] = color
     return rgb
 
-import random
-n_samples = 20
-random.seed(47)  # for reproducibility
-sample_indices = random.sample(range(len(dataset)), n_samples)
+image_dir='data/pilEAUte/all_masks'
+
+image_paths= extract_image_paths_pileaute(image_dir, start_folder='2023-10-13', end_folder='2025-02-19', magnification=10)
+
+torch.cuda.set_device(3) 
+torch.set_num_threads(4)
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+torch.manual_seed(25)
+
+save_model_path = 'outputs/trained_SegFormer.pt'
+model = torch.load(save_model_path, map_location=device)
+
+model.eval()
+
 
 #plot some infered mask for visual evaluation
 with torch.no_grad():
-    for idx in sample_indices:
-        print('idx: ', idx)
-        image_path = dataset.image_paths[idx]
-        image = np.array(Image.open(image_path).convert("RGB"))
+    for idx in range(len(image_paths)):
+        image_path = image_paths[idx]
+        image_np = np.array(Image.open(image_path).convert("RGB"))
+        #image_pil.save(f'outputs/masks_pileaute/{idx}_image.png')
 
-        pred_np = predict_full_image(model, image, device)
+        pred_np = predict_full_image(model, image_np, device, val_transform=val_transform, tile_size=512, overlap=128, num_classes=3)
         pred_rgb = decode_mask(pred_np, COLORS)
+        PIL_img = Image.fromarray(pred_rgb)
+        PIL_img.save(image_path)
 
-        # Plot original, predicted mask and overlay
-        plt.figure(figsize=(12,4), dpi=500)
-        # Overlay ground truth
-        plt.subplot(1,3,1)
-        plt.imshow(image)
-        plt.title("Image")
-        plt.axis('off')
+        # # Plot original, predicted mask and overlay
+        # plt.figure(figsize=(12,4), dpi=500)
+        # # Overlay ground truth
+        # plt.subplot(1,3,1)
+        # plt.imshow(image_np)
+        # plt.title("Image")
+        # plt.axis('off')
 
-        # Overlay predicted mask
-        plt.subplot(1,3,2)
-        plt.imshow(pred_rgb)
-        plt.title("Predicted Mask")
-        plt.axis('off')
+        # # Overlay predicted mask
+        # plt.subplot(1,3,2)
+        # plt.imshow(pred_rgb)
+        # plt.title("Predicted Mask")
+        # plt.axis('off')
 
-        # Overlay predicted mask
-        plt.subplot(1,3,3)
-        plt.imshow(image)
-        plt.imshow(pred_rgb, alpha=0.4)
-        plt.title("Image+predicted mask")
-        plt.axis('off')
+        # # Overlay predicted mask
+        # plt.subplot(1,3,3)
+        # plt.imshow(image_np)
+        # plt.imshow(pred_rgb, alpha=0.4)
+        # plt.title("Image+predicted mask")
+        # plt.axis('off')
 
-        plt.savefig(f'outputs/example_masks_pilEAUte/fig{idx}')
+        # plt.savefig(f'outputs/example_masks_pilEAUte/old_microscope/fig{idx}')
+
+
+
+#### generate some masks to later finetune the model on them
+
 
 # val_transform_512x512 = A.Compose([
 #     A.CenterCrop(512, 512),
