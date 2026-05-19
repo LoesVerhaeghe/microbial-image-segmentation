@@ -1,0 +1,147 @@
+import numpy as np
+import matplotlib.pyplot as plt
+from torch.utils.data import DataLoader, Dataset
+import torch
+import os
+from PIL import Image
+import albumentations as A
+from os import listdir
+from albumentations.pytorch import ToTensorV2
+
+
+def extract_image_paths_pileaute(path_to_folders, start_folder, end_folder, magnification=10):
+    """
+    Extract paths from all the images from the specified folder.
+
+    Parameters:
+        base_folder (str): The base folder containing subfolders with images.
+        start_folder: start date from which images need to be extracted
+        end_folder: end date until which images need to be extracted
+        magnification: type of magnification (10 or 40)
+
+    Returns:
+        all_images (list): A list of all extracted images.
+    """
+    image_folders = sorted(listdir(path_to_folders)) 
+
+    all_paths = []
+
+    # Select the images from start until end date
+    selected_folders = [folder for folder in image_folders if start_folder <= folder <= end_folder]
+    selected_folders = sorted(selected_folders)
+
+    # Save all paths from the selected folders
+    for folder in selected_folders:
+        path_to_image = f"{path_to_folders}/{folder}/basin3/{magnification}x"
+        if not os.path.exists(path_to_image):  # <- skip missing folders
+            continue
+        images_list = sorted(listdir(path_to_image))
+        for image in images_list:
+            all_paths.append(f"{path_to_image}/{image}")
+    return all_paths
+
+val_transform = A.Compose([
+    A.Normalize(mean=(0.485, 0.456, 0.406),
+                std=(0.229, 0.224, 0.225)),
+    ToTensorV2(),
+], additional_targets={'mask': 'mask'})
+
+def predict_full_image(model, image_np, device, val_transform=val_transform,tile_size=512, overlap=128, num_classes=3):
+    model.eval()
+
+    stride = tile_size - overlap
+    H, W, _ = image_np.shape
+
+    prob_map = np.zeros((num_classes, H, W), dtype=np.float32)
+    count_map = np.zeros((H, W), dtype=np.float32)
+
+    for y in range(0, H, stride):
+        for x in range(0, W, stride):
+
+            tile = image_np[y:y+tile_size, x:x+tile_size]
+
+            h_tile, w_tile = tile.shape[:2]
+
+            # pad if at border
+            if h_tile < tile_size or w_tile < tile_size:
+                pad_img = np.zeros((tile_size, tile_size, 3), dtype=tile.dtype)
+                pad_img[:h_tile, :w_tile] = tile
+                tile = pad_img
+
+            # transform
+            augmented = val_transform(image=tile)
+            tile_tensor = augmented["image"].unsqueeze(0).to(device)
+
+            with torch.no_grad():
+                output = model(tile_tensor)
+                probs = torch.softmax(output, dim=1)[0].cpu().numpy()
+
+            probs = probs[:, :h_tile, :w_tile]
+
+            prob_map[:, y:y+h_tile, x:x+w_tile] += probs
+            count_map[y:y+h_tile, x:x+w_tile] += 1
+
+    prob_map /= count_map
+    final_mask = np.argmax(prob_map, axis=0)
+
+    return final_mask
+
+def decode_mask_whitebackground(mask, image_np):
+    """Convert [H, W] class mask → RGB image with white background"""
+    white_background = image_np.copy()
+    white_background[mask == 0] = [255, 255, 255]  # white background
+
+    return white_background
+
+image_dir='data/pilEAUte/all_images_whitebackground'
+
+image_paths10x= extract_image_paths_pileaute(image_dir, start_folder='2023-10-13', end_folder='2025-02-19', magnification=10)
+image_paths40x= extract_image_paths_pileaute(image_dir, start_folder='2023-10-13', end_folder='2025-02-19', magnification=40)
+image_paths=image_paths10x + image_paths40x
+
+torch.cuda.set_device(0) 
+torch.set_num_threads(4)
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+torch.manual_seed(25)
+
+save_model_path = 'outputs/trained_SegFormer.pt'
+model = torch.load(save_model_path, map_location=device)
+
+model.eval()
+
+
+#plot some infered mask for visual evaluation
+with torch.no_grad():
+    for idx in range(len(image_paths)):
+        image_path = image_paths[idx]
+        image_np = np.array(Image.open(image_path).convert("RGB"))
+        #image_pil.save(f'outputs/masks_pileaute/{idx}_image.png')
+
+        pred_np = predict_full_image(model, image_np, device, val_transform=val_transform, tile_size=512, overlap=128, num_classes=3)
+        pred_rgb = decode_mask_whitebackground(pred_np, image_np)
+        PIL_img = Image.fromarray(pred_rgb)
+        #PIL_img.save(image_path)
+
+        # # # Plot original, predicted mask and overlay
+        # plt.figure(figsize=(12,4), dpi=500)
+        # # Overlay ground truth
+        # plt.subplot(1,3,1)
+        # plt.imshow(image_np)
+        # plt.title("Image")
+        # plt.axis('off')
+
+        # # Overlay predicted mask
+        # plt.subplot(1,3,2)
+        # plt.imshow(pred_rgb)
+        # plt.title("Predicted Mask")
+        # plt.axis('off')
+
+        # # Overlay predicted mask
+        # plt.subplot(1,3,3)
+        # plt.imshow(image_np)
+        # plt.imshow(pred_rgb, alpha=0.4)
+        # plt.title("Image+predicted mask")
+        # plt.axis('off')
+
+        # plt.savefig(f'outputs/example_masks_pilEAUte/old_microscope/fig{idx}')
+
