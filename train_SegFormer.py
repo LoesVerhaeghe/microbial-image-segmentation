@@ -1,8 +1,7 @@
 '''
-This code finetunes the already trained SegFormer model 
+This code finetunes the SegFormer model 
 to segment microscopic images of activated sludge into background, filament and flocs
-
-the model is already pretrained on the PBM dataset and will here be finetuned using only a few images of the pilEAUte dataset
+it does use the PBM and pilEAUte segmented images
 '''
 
 import torch
@@ -10,18 +9,15 @@ import torch.nn as nn
 import numpy as np
 import albumentations as A
 from albumentations.pytorch import ToTensorV2
-from torch.utils.data import DataLoader, Dataset, Subset
+from torch.utils.data import DataLoader, Dataset, Subset, WeightedRandomSampler, ConcatDataset
 import segmentation_models_pytorch as smp
 from PIL import Image
 import os
 import time
 import matplotlib.pyplot as plt
+from tifffile import imread
 
-
-
-##### everything needs to be adapted!
-
-class SegmentationDataset(Dataset):
+class SegmentationDatasetPCM(Dataset):
     def __init__(self, image_dir, mask_dir, transform=None):
         self.image_dir = image_dir
         self.mask_dir = mask_dir
@@ -57,8 +53,36 @@ class SegmentationDataset(Dataset):
 
         return image, label
 
+class SegmentationDatasetPilEAUte(Dataset):
+    def __init__(self, image_dir, mask_dir, transform=None):
+        self.image_dir = image_dir
+        self.mask_dir = mask_dir
+        self.transform = transform
+        self.images = sorted(os.listdir(image_dir))
+        self.masks = sorted(os.listdir(mask_dir))
+
+    def __len__(self):
+        return len(self.images)
+
+    def __getitem__(self, idx):
+        image = Image.open(os.path.join(self.image_dir, self.images[idx])).convert("RGB")
+        mask = imread(os.path.join(self.mask_dir, self.masks[idx]))
+        mask=mask.astype(np.uint8)
+        #orig_image=image
+
+        if self.transform is not None:
+            augmented = self.transform(image=np.array(image), mask=mask)
+            image = augmented["image"]
+            label = augmented["mask"]
+
+        # Albumentations already returns tensors if ToTensorV2 is used
+        image = image.float()
+        label = label.long()
+
+        return image, label#, orig_image
+
 ##  horizontal and vertical flipping and rotation only to train dataset
-train_transform = A.Compose([
+train_transform_PCM = A.Compose([
     # ---- scale robustness ----
     A.OneOf([
         A.RandomScale(scale_limit=(-0.6, -0.2)),
@@ -91,6 +115,39 @@ train_transform = A.Compose([
     ToTensorV2()
 ], additional_targets={'mask': 'mask'})
 
+train_transform_pilEAUte = A.Compose([
+    # ---- scale robustness ----
+    A.OneOf([
+        A.RandomScale(scale_limit=(-0.6, -0.2)),
+        A.RandomScale(scale_limit=(0.0, 0.3)),
+    ], p=0.7),
+
+    A.PadIfNeeded(min_height=700, min_width=700),
+    A.RandomCrop(512, 512),
+
+    # ---- geometry ----
+    A.HorizontalFlip(p=0.5),
+    A.VerticalFlip(p=0.5),
+    A.RandomRotate90(p=0.5),
+    A.Affine(scale=(0.8,1.2), rotate=(20), shear=(-10,10), p=0.5),
+
+    # ---- microscopy realism ----
+    A.OneOf([
+        A.GaussianBlur(blur_limit=5),
+        A.MotionBlur(blur_limit=5),
+    ], p=0.5),
+
+    A.RandomBrightnessContrast(brightness_limit=(-0.3,0.3), p=0.5),
+    A.RandomGamma(p=0.3),
+
+    # ---- slight resolution degradation ----
+    A.Downscale(scale_range=[0.65,0.9], p=0.5),
+
+    A.Normalize(mean=(0.485,0.456,0.406),
+                std=(0.229,0.224,0.225)),
+    ToTensorV2()
+], additional_targets={'mask': 'mask'})
+
 val_transform = A.Compose([
     A.CenterCrop(512, 512),
     A.Normalize(mean=(0.485, 0.456, 0.406),
@@ -99,14 +156,14 @@ val_transform = A.Compose([
 ], additional_targets={'mask': 'mask'})
 
 
-## load dataset
+## load dataset PCM
 image_dir='data/paper_PCM/train/images'
 mask_dir='data/paper_PCM/train/labels'
 
-train_dataset_full = SegmentationDataset(image_dir, mask_dir, transform=train_transform)
-val_dataset_full = SegmentationDataset(image_dir, mask_dir, transform=val_transform)
+train_dataset_full_PCM = SegmentationDatasetPCM(image_dir, mask_dir, transform=train_transform_PCM)
+val_dataset = SegmentationDatasetPCM(image_dir, mask_dir, transform=val_transform)
 
-dataset_size = len(train_dataset_full)
+dataset_size = len(train_dataset_full_PCM)
 indices = list(range(dataset_size))
 
 np.random.seed(25)      # for reproducibility
@@ -116,11 +173,41 @@ split = int(0.90 * dataset_size)
 train_indices = indices[:split]
 val_indices = indices[split:]
 
-train_dataset = Subset(train_dataset_full, train_indices)
-val_dataset = Subset(val_dataset_full, val_indices)
+train_dataset_PCM = Subset(train_dataset_full_PCM, train_indices)
+val_dataset = Subset(val_dataset, val_indices)
 
-train_loader = DataLoader(train_dataset, batch_size=8, num_workers=2, shuffle=True, pin_memory=True, drop_last=True)
+# load dataset pilEAUte
+image_dir='data/pilEAUte/finetuned_train_im_masks/images'
+mask_dir='data/pilEAUte/finetuned_train_im_masks/masks'
+
+train_dataset_pilEAUte = SegmentationDatasetPilEAUte(image_dir, mask_dir, transform=train_transform_pilEAUte)
+
+
+### combine dataset
+
+combined_dataset = ConcatDataset([train_dataset_PCM, train_dataset_pilEAUte])
+# PCM = 500 samples, PilEAUte = 8 samples
+pcm_weights = [1.0] * len(train_dataset_PCM)
+pileaute_weights = [10.0] * len(train_dataset_pilEAUte)  # oversample factor
+
+weights = pcm_weights + pileaute_weights
+
+sampler = WeightedRandomSampler(
+    weights=weights,
+    num_samples=2*len(weights), # because we only crop out a small part of the image
+    replacement=True
+)
+
+train_loader = DataLoader(combined_dataset, batch_size=8, num_workers=2, shuffle=False, sampler=sampler, pin_memory=True, drop_last=True)
 val_loader = DataLoader(val_dataset, batch_size=8,  num_workers=2, shuffle=False, pin_memory=True)
+
+
+# Move model to GPU
+torch.cuda.set_device(3) 
+torch.set_num_threads(4)
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+torch.manual_seed(25)
+
 
 ## load model
 num_classes = 3
@@ -133,12 +220,6 @@ model = smp.Segformer(
     activation=None,                   
     upsampling=4                      # final upsampling factor
 )
-
-# Move model to GPU
-torch.cuda.set_device(3) 
-torch.set_num_threads(4)
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-torch.manual_seed(25)
 
 #define a mixed loss fct
 class MixedLoss(nn.Module):
@@ -163,7 +244,7 @@ criterion = MixedLoss()
 # Optimizer and LR Scheduler
 optimizer = torch.optim.AdamW(model.parameters(), lr=6e-5, betas=(0.9,0.999), weight_decay=0.01)
 
-num_epochs = 50
+num_epochs = 80
 
 scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
     optimizer,
@@ -275,3 +356,87 @@ for epoch in range(num_epochs):
 
     if save_model_path is not None:
         torch.save(model, save_model_path)
+
+
+### testing
+
+test_image_dir='data/paper_PCM/test/images'
+test_mask_dir='data/paper_PCM/test/labels'
+
+test_dataset = SegmentationDatasetPCM(test_image_dir, test_mask_dir, transform=val_transform)
+test_loader = DataLoader(test_dataset, batch_size=1, num_workers=1, shuffle=False, pin_memory=True, drop_last=False)
+
+save_model_path = 'outputs/trained_SegFormer.pt'
+model = torch.load(save_model_path, map_location=device)
+
+model.eval()
+
+COLORS = {
+    0: [0, 0, 0],        # background
+    1: [255, 0, 0],      # class 1 - red
+    2: [0, 255, 0],      # class 2 - green
+}
+
+#### plot some masks for evaluation
+
+def decode_mask(mask):
+    """Convert [H, W] class mask → RGB image"""
+    h, w = mask.shape
+    rgb = np.zeros((h, w, 3), dtype=np.uint8)
+    for cls, color in COLORS.items():
+        rgb[mask == cls] = color
+    return rgb
+
+with torch.no_grad():
+    for idx in range(len(test_dataset)):
+        image, mask = test_dataset[idx]
+
+        # Add batch dimension
+        image = image.unsqueeze(0).to(device)  # [1, 3, H, W]
+        mask = mask.to(device)    # [H, W]
+
+        # Forward pass
+        output = model(image)  # [1, 3, H, W]
+
+        # Convert logits to probabilities
+        probs = torch.softmax(output, dim=1)
+        pred_mask = torch.argmax(probs, dim=1)[0]   # [H, W]
+
+        # Move tensors to CPU for visualization
+        img_np = image[0].permute(1,2,0).cpu().numpy()
+        mask_np = mask.cpu().numpy()
+        pred_np = pred_mask.cpu().numpy()
+        
+        mean = np.array([0.485, 0.456, 0.406])
+        std  = np.array([0.229, 0.224, 0.225])
+        img_np = (img_np * std) + mean
+        img_np = np.clip(img_np, 0, 1)
+
+        mask_rgb   = decode_mask(mask_np)
+        pred_rgb = decode_mask(pred_np)
+
+        # Plot original, true mask, and predicted mask
+        plt.figure(figsize=(12,4))
+        # Overlay ground truth
+        plt.subplot(1,3,1)
+        plt.imshow(img_np)
+        plt.title("Image")
+        plt.axis('off')
+
+        # Overlay predicted mask
+        plt.subplot(1,3,2)
+        plt.imshow(mask_rgb)
+        plt.title("Ground truth")
+        plt.axis('off')
+
+        # Overlay predicted mask
+        plt.subplot(1,3,3)
+        plt.imshow(pred_rgb)
+        plt.title("Predicted Mask")
+        plt.axis('off')
+
+        plt.savefig(f'outputs/example_masks_PCM/fig{idx}', dpi=300)
+        plt.close()
+        # break after a few images
+        if idx >= 10:
+            break

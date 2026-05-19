@@ -1,7 +1,10 @@
 '''
-This code finetunes the SegFormer model 
+This code finetunes the already trained SegFormer model 
 to segment microscopic images of activated sludge into background, filament and flocs
-it does use the PBM images
+
+the model is already pretrained on the PBM dataset and will here be finetuned using only a few images of the pilEAUte dataset
+
+this didn't work! pileaute images need to be merged with PCM and model needs to be trained together on them
 '''
 
 import torch
@@ -15,6 +18,7 @@ from PIL import Image
 import os
 import time
 import matplotlib.pyplot as plt
+from tifffile import imread
 
 
 class SegmentationDataset(Dataset):
@@ -30,20 +34,12 @@ class SegmentationDataset(Dataset):
 
     def __getitem__(self, idx):
         image = Image.open(os.path.join(self.image_dir, self.images[idx])).convert("RGB")
-        mask = Image.open(os.path.join(self.mask_dir, self.masks[idx])).convert("RGB")
-        mask = np.array(mask)
-
-        # --- COLOR → CLASS MAP ---
-        label = np.zeros((mask.shape[0], mask.shape[1]), dtype=np.int64)
-        label[(mask[:, :, 0] == 128) &
-              (mask[:, :, 1] == 0) &
-              (mask[:, :, 2] == 0)] = 1 # red is floc
-        label[(mask[:, :, 0] == 0) &
-              (mask[:, :, 1] == 128) &
-              (mask[:, :, 2] == 0)] = 2 # green is filament
+        mask = imread(os.path.join(self.mask_dir, self.masks[idx]))
+        mask=mask.astype(np.uint8)
+        #orig_image=image
 
         if self.transform is not None:
-            augmented = self.transform(image=np.array(image), mask=label)
+            augmented = self.transform(image=np.array(image), mask=mask)
             image = augmented["image"]
             label = augmented["mask"]
 
@@ -51,9 +47,9 @@ class SegmentationDataset(Dataset):
         image = image.float()
         label = label.long()
 
-        return image, label
+        return image, label#, orig_image
 
-##  horizontal and vertical flipping and rotation only to train dataset
+##### maybe i should make augmentations stronger -- TBD
 train_transform = A.Compose([
     # ---- scale robustness ----
     A.OneOf([
@@ -96,28 +92,46 @@ val_transform = A.Compose([
 
 
 ## load dataset
-image_dir='data/paper_PCM/train/images'
-mask_dir='data/paper_PCM/train/labels'
+image_dir='data/pilEAUte/finetuned_train_im_masks/images'
+mask_dir='data/pilEAUte/finetuned_train_im_masks/masks'
 
 train_dataset_full = SegmentationDataset(image_dir, mask_dir, transform=train_transform)
-val_dataset_full = SegmentationDataset(image_dir, mask_dir, transform=val_transform)
 
-dataset_size = len(train_dataset_full)
-indices = list(range(dataset_size))
+# ### plot augmentations 
+# for idx in range(0,5):
+#     image, label, orig_image = train_dataset_full[idx]
+
+#     # Plot the images side by side
+#     plt.figure(figsize=(15, 5), dpi=200)
+
+#     # Original image subplot
+#     plt.subplot(1, 3, 1)
+#     plt.imshow(orig_image)
+#     plt.title("Original Image")
+#     plt.axis('off')  # Turn off axis labels
+
+#     # Original image subplot
+#     plt.subplot(1, 3, 2)
+#     plt.imshow(image.permute(1, 2, 0))
+#     plt.title("Augmented Image")
+#     plt.axis('off')  # Turn off axis labels
+
+#     # Transformed image subplot
+#     plt.subplot(1, 3, 3)
+#     plt.imshow(label)
+#     plt.title("Transformed Image")
+#     plt.axis('off')  # Turn off axis labels
+
+#     # Show the plot
+#     plt.tight_layout()
+#     plt.show()
+
 
 np.random.seed(25)      # for reproducibility
-np.random.shuffle(indices)
 
-split = int(0.90 * dataset_size)
-train_indices = indices[:split]
-val_indices = indices[split:]
-
-train_dataset = Subset(train_dataset_full, train_indices)
-val_dataset = Subset(val_dataset_full, val_indices)
-
-train_loader = DataLoader(train_dataset, batch_size=8, num_workers=2, shuffle=True, pin_memory=True, drop_last=True)
-val_loader = DataLoader(val_dataset, batch_size=8,  num_workers=2, shuffle=False, pin_memory=True)
-
+# try without validation (because only 8 masks available!!)
+train_loader = DataLoader(train_dataset_full, batch_size=2, num_workers=2, shuffle=True, pin_memory=True, drop_last=True)
+val_loader=None
 
 # Move model to GPU
 torch.cuda.set_device(3) 
@@ -125,18 +139,7 @@ torch.set_num_threads(4)
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 torch.manual_seed(25)
 
-
-## load model
-num_classes = 3
-model = smp.Segformer(
-    encoder_name="mit_b1",             # the backbone: mit_b3 = SegFormer B3
-    encoder_weights='imagenet',   
-    decoder_segmentation_channels=128, # channels in decoder, can tune
-    in_channels=3,                      
-    classes=num_classes,               
-    activation=None,                   
-    upsampling=4                      # final upsampling factor
-)
+model = torch.load('outputs/trained_SegFormer.pt', map_location=device)
 
 #define a mixed loss fct
 class MixedLoss(nn.Module):
@@ -159,20 +162,13 @@ class MixedLoss(nn.Module):
 criterion = MixedLoss()
 
 # Optimizer and LR Scheduler
-optimizer = torch.optim.AdamW(model.parameters(), lr=6e-5, betas=(0.9,0.999), weight_decay=0.01)
+optimizer = torch.optim.AdamW(model.parameters(), lr=5e-7, betas=(0.9,0.999), weight_decay=0.01)
 
 num_epochs = 50
 
-scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-    optimizer,
-    factor=0.5,
-    patience=5
-)
-
-patience = 5
 skip_epoch_stats= False
-plot_losses_path='outputs/losses'
-save_model_path = 'outputs/trained_SegFormer.pt'
+plot_losses_path='outputs_finetunedmodel/losses.png'
+save_model_path = 'outputs_finetunedmodel/finetuned_SegFormer.pt'
 
 # --------------------------------------------------------
 # Training Loop
@@ -269,91 +265,7 @@ for epoch in range(num_epochs):
         plt.xlabel('Epoch')
         plt.ylabel('Loss')
         plt.legend()
-        plt.savefig(f'{plot_losses_path}', dpi=300, bbox_inches='tight', pad_inches=0.1)  
+        plt.savefig(plot_losses_path, dpi=300, bbox_inches='tight', pad_inches=0.1)  
 
     if save_model_path is not None:
         torch.save(model, save_model_path)
-
-
-### testing
-
-test_image_dir='data/paper_PCM/test/images'
-test_mask_dir='data/paper_PCM/test/labels'
-
-test_dataset = SegmentationDataset(test_image_dir, test_mask_dir, transform=val_transform)
-test_loader = DataLoader(test_dataset, batch_size=1, num_workers=1, shuffle=False, pin_memory=True, drop_last=False)
-
-save_model_path = 'outputs/trained_SegFormer.pt'
-model = torch.load(save_model_path, map_location=device)
-
-model.eval()
-
-COLORS = {
-    0: [0, 0, 0],        # background
-    1: [255, 0, 0],      # class 1 - red
-    2: [0, 255, 0],      # class 2 - green
-}
-
-#### plot some masks for evaluation
-
-def decode_mask(mask):
-    """Convert [H, W] class mask → RGB image"""
-    h, w = mask.shape
-    rgb = np.zeros((h, w, 3), dtype=np.uint8)
-    for cls, color in COLORS.items():
-        rgb[mask == cls] = color
-    return rgb
-
-with torch.no_grad():
-    for idx in range(len(test_dataset)):
-        image, mask = test_dataset[idx]
-
-        # Add batch dimension
-        image = image.unsqueeze(0).to(device)  # [1, 3, H, W]
-        mask = mask.to(device)    # [H, W]
-
-        # Forward pass
-        output = model(image)  # [1, 3, H, W]
-
-        # Convert logits to probabilities
-        probs = torch.softmax(output, dim=1)
-        pred_mask = torch.argmax(probs, dim=1)[0]   # [H, W]
-
-        # Move tensors to CPU for visualization
-        img_np = image[0].permute(1,2,0).cpu().numpy()
-        mask_np = mask.cpu().numpy()
-        pred_np = pred_mask.cpu().numpy()
-        
-        mean = np.array([0.485, 0.456, 0.406])
-        std  = np.array([0.229, 0.224, 0.225])
-        img_np = (img_np * std) + mean
-        img_np = np.clip(img_np, 0, 1)
-
-        mask_rgb   = decode_mask(mask_np)
-        pred_rgb = decode_mask(pred_np)
-
-        # Plot original, true mask, and predicted mask
-        plt.figure(figsize=(12,4))
-        # Overlay ground truth
-        plt.subplot(1,3,1)
-        plt.imshow(img_np)
-        plt.title("Image")
-        plt.axis('off')
-
-        # Overlay predicted mask
-        plt.subplot(1,3,2)
-        plt.imshow(mask_rgb)
-        plt.title("Ground truth")
-        plt.axis('off')
-
-        # Overlay predicted mask
-        plt.subplot(1,3,3)
-        plt.imshow(pred_rgb)
-        plt.title("Predicted Mask")
-        plt.axis('off')
-
-        plt.savefig(f'outputs/example_masks_PCM/fig{idx}', dpi=300)
-        plt.close()
-        # break after a few images
-        if idx >= 10:
-            break
