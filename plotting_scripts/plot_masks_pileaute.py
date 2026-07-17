@@ -1,3 +1,9 @@
+"""
+Generate and plot some masks for pilEAUte images and save them
+Also save some masks to later finetune the model on them (commented out for now)
+"""
+
+
 import numpy as np
 import matplotlib.pyplot as plt
 from torch.utils.data import DataLoader, Dataset

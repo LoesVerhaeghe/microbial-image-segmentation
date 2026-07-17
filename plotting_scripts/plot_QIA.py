@@ -1,3 +1,8 @@
+"""
+for already generated masks, calculate the properties of the flocs and filaments in the mask and plot the results
+"""
+
+
 # 0=background, 1=floc, 2=filament
 import numpy as np
 from skimage import measure, morphology

@@ -182,10 +182,9 @@ mask_dir='data/pilEAUte/finetuned_train_im_masks/masks'
 
 train_dataset_pilEAUte = SegmentationDatasetPilEAUte(image_dir, mask_dir, transform=train_transform_pilEAUte)
 
-
 ### combine dataset
-
 combined_dataset = ConcatDataset([train_dataset_PCM, train_dataset_pilEAUte])
+
 # PCM = 500 samples, PilEAUte = 8 samples
 pcm_weights = [1.0] * len(train_dataset_PCM)
 pileaute_weights = [10.0] * len(train_dataset_pilEAUte)  # oversample factor
@@ -198,7 +197,7 @@ sampler = WeightedRandomSampler(
     replacement=True
 )
 
-train_loader = DataLoader(combined_dataset, batch_size=8, num_workers=2, shuffle=False, sampler=sampler, pin_memory=True, drop_last=True)
+train_loader = DataLoader(combined_dataset, batch_size=8, num_workers=2, shuffle=True, sampler=sampler, pin_memory=True, drop_last=True)
 val_loader = DataLoader(val_dataset, batch_size=8,  num_workers=2, shuffle=False, pin_memory=True)
 
 
@@ -212,7 +211,7 @@ torch.manual_seed(25)
 ## load model
 num_classes = 3
 model = smp.Segformer(
-    encoder_name="mit_b1",             # the backbone: mit_b3 = SegFormer B3
+    encoder_name="mit_b1",             
     encoder_weights='imagenet',   
     decoder_segmentation_channels=128, # channels in decoder, can tune
     in_channels=3,                      
@@ -226,8 +225,8 @@ class MixedLoss(nn.Module):
     def __init__(self, coef_ce=0.5, coef_dice=0.5, device=device):
         super().__init__()
         class_weights = torch.tensor([0.05, 0.35, 0.6], dtype=torch.float32).to(device) # low frequency -> higher weight
-        self.ce = nn.CrossEntropyLoss(weight=class_weights)
-        self.dice = smp.losses.DiceLoss(mode="multiclass")
+        self.ce = nn.CrossEntropyLoss(weight=class_weights) # quantifies how far off the model's predictions are from the true labels, weighted to account for class imbalance
+        self.dice = smp.losses.DiceLoss(mode="multiclass") # area of overlap / area of union
         self.coef_ce = coef_ce
         self.coef_dice=coef_dice
 
@@ -242,7 +241,9 @@ class MixedLoss(nn.Module):
 criterion = MixedLoss()
 
 # Optimizer and LR Scheduler
-optimizer = torch.optim.AdamW(model.parameters(), lr=6e-5, betas=(0.9,0.999), weight_decay=0.01)
+# beta1: smooth direction of learning, beta2: smooth scaling of step size, 
+# weight decay: regularization to prevent overfitting, penalize large weights
+optimizer = torch.optim.AdamW(model.parameters(), lr=6e-5, betas=(0.9,0.999), weight_decay=0.01) 
 
 num_epochs = 80
 

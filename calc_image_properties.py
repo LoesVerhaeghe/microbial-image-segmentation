@@ -1,4 +1,13 @@
+"""
+Calculate all image properties based on a defined folder: 
+based on folder location: generate mask for image in folder and then calculate properties. 
+finally average them out to get one result for the folder
+"""
+
+
+
 from torch.utils.data import Dataset, DataLoader
+import os
 from os import listdir
 import numpy as np
 from PIL import Image
@@ -7,6 +16,7 @@ from albumentations.pytorch import ToTensorV2
 import torch
 from skimage import measure, morphology
 from skimage.morphology import skeletonize
+import pandas as pd
 
 ### define functions
     
@@ -57,39 +67,104 @@ def predict_full_image(model, image_np, device, val_transform=val_transform, til
 
     return final_mask
 
-### read dataset
 
-folder_dir='data/pilEAUte/all_images/2024-02-06/basin5/10x'
-all_image_paths=[]
-for image in listdir(folder_dir):
-    image_path=f'{folder_dir}/{image}'
-    all_image_paths.append(image_path)
+## define function that segments images, then calculates properties and averages them out
 
-device = torch.device("cpu")
-model_path = 'outputs/trained_SegFormer.pt'
-model = torch.load(model_path, map_location=device)
-model.eval()
 
+def calculate_properties_for_one_folder(all_image_paths, model, device):
 ### segment all images
 
-all_masks=[]
-with torch.no_grad():
-    for image_path in all_image_paths:
+    all_masks=[]
+    with torch.no_grad():
+        for image_path in all_image_paths:
+            image = np.array(Image.open(image_path).convert("RGB"))
+
+            pred_np = predict_full_image(model, 
+                                        image, 
+                                        device, 
+                                        val_transform=val_transform, 
+                                        tile_size=512, 
+                                        overlap=128, 
+                                        num_classes=3)
+            all_masks.append(pred_np)
+
+
+    ### calculate properties per segmented image
+    all_metrics=[]
+    for mask in all_masks:
+        floc_mask = (mask == 1)
+        filament_mask = (mask == 2)
+
+        # calculate floc properties:
+        floc_mask = morphology.remove_small_objects(floc_mask, min_size=50) 
+        labeled_flocs = measure.label(floc_mask)   #Label connected regions of an integer array
+        floc_regions = measure.regionprops(labeled_flocs) #Measure properties of labeled image regions
+
+        total_floc_area = np.sum(floc_mask)
+
+        areas = []
+        circularities = []
+        aspect_ratios = []
+
+        for r in floc_regions: # for every floc
+            if r.perimeter_crofton  <= 0:
+                continue
+            area = r.area #number of pixels of the region scaled by pixel area
+            perimeter = r.perimeter_crofton   #approximates the contour as a line through the centers of border pixels using a 4-connectivity.
+
+            circularity = 4 * np.pi * area / (perimeter ** 2) #how closely a shape matches a perfect circle
+
+            areas.append(area)
+            circularities.append(circularity)
+
+        # calculate filament properties:
+
+        skeleton = skeletonize(filament_mask)
+
+        total_filament_length = np.sum(skeleton)
+        total_filament_area = np.sum(filament_mask)
+
+        labeled_filaments = measure.label(skeleton)
+        filament_regions = measure.regionprops(labeled_filaments)
+        filament_lengths = []
+        for r in filament_regions:
+            length = r.area  # number of skeleton pixels
+            filament_lengths.append(length)
+
+        ## summarize all metrics
+        image_area = mask.size
+
+        metrics = {
+            "num_flocs": len(areas),
+            "mean_floc_area": np.mean(areas) if areas else 0,
+            "mean_circularity": np.mean(circularities) if circularities else 0,
+            "total_filament_length": total_filament_length,
+            "mean_filament_length": np.mean(filament_lengths) if filament_lengths else 0,
+            "filament_to_floc_ratio": total_filament_area / total_floc_area if total_floc_area > 0 else 0,
+            "floc_area_fraction": total_floc_area / image_area,
+        }
+        all_metrics.append(metrics)
+
+    #df=pd.DataFrame(all_metrics)
+
+    return all_metrics
+
+
+def calculate_properties_per_image(image_path, model, device):
+### segment image
+    with torch.no_grad():
         image = np.array(Image.open(image_path).convert("RGB"))
 
-        pred_np = predict_full_image(model, 
-                                     image, 
-                                     device, 
-                                     val_transform=val_transform, 
-                                     tile_size=512, 
-                                     overlap=128, 
-                                     num_classes=3)
-        all_masks.append(pred_np)
+        mask = predict_full_image(model, 
+                                    image, 
+                                    device, 
+                                    val_transform=val_transform, 
+                                    tile_size=512, 
+                                    overlap=128, 
+                                    num_classes=3)
 
+    ### calculate properties per segmented image
 
-### calculate properties per segmented image
-all_metrics=[]
-for mask in all_masks:
     floc_mask = (mask == 1)
     filament_mask = (mask == 2)
 
@@ -141,9 +216,40 @@ for mask in all_masks:
         "filament_to_floc_ratio": total_filament_area / total_floc_area if total_floc_area > 0 else 0,
         "floc_area_fraction": total_floc_area / image_area,
     }
-    all_metrics.append(metrics)
+
+    #df=pd.DataFrame(all_metrics)
+
+    return metrics
+
+torch.cuda.set_device(3) 
+torch.set_num_threads(4)
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+torch.manual_seed(25)
+
+model_path = 'outputs/trained_SegFormer.pt'
+model = torch.load(model_path, map_location=device)
+model.eval()
 
 
-# calculate average properties
-import pandas as pd
-df=pd.DataFrame(all_metrics)
+all_paths=[]
+folder_dir='data/pilEAUte/all_images'
+for folder in listdir(folder_dir):
+    path_to_image = f"{folder_dir}/{folder}/basin5/10x"
+    for image in listdir(path_to_image):
+        all_paths.append([f"{path_to_image}/{image}", folder, image])
+
+records = []
+i=0
+for row in all_paths:
+    path, folder, image = row
+    metrics=calculate_properties_per_image(path, model, device)
+    
+    records.append({
+            "folder": folder,
+            "image": image,
+            **metrics
+        })
+
+df=pd.DataFrame(records)
+df.to_csv("outputs/QIA_metrics.csv", index=True)
+df.groupby("folder").mean(numeric_only=True)
