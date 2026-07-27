@@ -129,19 +129,19 @@ train_transform_pilEAUte = A.Compose([
     A.HorizontalFlip(p=0.5),
     A.VerticalFlip(p=0.5),
     A.RandomRotate90(p=0.5),
-    A.Affine(scale=(0.8,1.2), rotate=(20), shear=(-10,10), p=0.5),
+    A.Affine(scale=(0.8,1.2), rotate=(20), shear=(-10,10), p=0.5), # larger scale
 
     # ---- microscopy realism ----
     A.OneOf([
         A.GaussianBlur(blur_limit=5),
-        A.MotionBlur(blur_limit=5),
+        A.MotionBlur(blur_limit=5), # larger blur
     ], p=0.5),
 
-    A.RandomBrightnessContrast(brightness_limit=(-0.3,0.3), p=0.5),
+    A.RandomBrightnessContrast(brightness_limit=(-0.3,0.3), p=0.5), # larger contrast
     A.RandomGamma(p=0.3),
 
     # ---- slight resolution degradation ----
-    A.Downscale(scale_range=[0.65,0.9], p=0.5),
+    A.Downscale(scale_range=[0.65,0.9], p=0.5), # larger scale
 
     A.Normalize(mean=(0.485,0.456,0.406),
                 std=(0.229,0.224,0.225)),
@@ -189,12 +189,12 @@ combined_dataset = ConcatDataset([train_dataset_PCM, train_dataset_pilEAUte])
 pcm_weights = [1.0] * len(train_dataset_PCM)
 pileaute_weights = [10.0] * len(train_dataset_pilEAUte)  # oversample factor
 
-weights = pcm_weights + pileaute_weights
+weights = pcm_weights + pileaute_weights #508 weights
 
 sampler = WeightedRandomSampler(
     weights=weights,
-    num_samples=2*len(weights), # because we only crop out a small part of the image
-    replacement=True
+    num_samples=2*len(weights),  # -> Each epoch will consist of 1016 randomly sampled images.
+    replacement=True # because we only crop out a small part of the image the same image can be used twice as sample
 )
 
 train_loader = DataLoader(combined_dataset, batch_size=8, num_workers=2, shuffle=True, sampler=sampler, pin_memory=True, drop_last=True)
