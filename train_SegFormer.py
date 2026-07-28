@@ -16,6 +16,7 @@ import os
 import time
 import matplotlib.pyplot as plt
 from tifffile import imread
+import copy 
 
 class SegmentationDatasetPCM(Dataset):
     def __init__(self, image_dir, mask_dir, transform=None):
@@ -197,7 +198,7 @@ sampler = WeightedRandomSampler(
     replacement=True # because we only crop out a small part of the image the same image can be used twice as sample
 )
 
-train_loader = DataLoader(combined_dataset, batch_size=8, num_workers=2, shuffle=True, sampler=sampler, pin_memory=True, drop_last=True)
+train_loader = DataLoader(combined_dataset, batch_size=8, num_workers=2, shuffle=False, sampler=sampler, pin_memory=True, drop_last=True)
 val_loader = DataLoader(val_dataset, batch_size=8,  num_workers=2, shuffle=False, pin_memory=True)
 
 
@@ -245,7 +246,7 @@ criterion = MixedLoss()
 # weight decay: regularization to prevent overfitting, penalize large weights
 optimizer = torch.optim.AdamW(model.parameters(), lr=6e-5, betas=(0.9,0.999), weight_decay=0.01) 
 
-num_epochs = 80
+num_epochs = 300
 
 scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
     optimizer,
@@ -253,7 +254,7 @@ scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
     patience=5
 )
 
-patience = 5
+patience = 20
 skip_epoch_stats= False
 plot_losses_path='outputs/losses'
 save_model_path = 'outputs/trained_SegFormer.pt'
@@ -270,6 +271,7 @@ log_dict = {'train_loss_per_epoch': [],
 start_time = time.time()
 best_val_loss = float('inf')
 patience_counter = 0
+best_model_weights = copy.deepcopy(model.state_dict())
 
 for epoch in range(num_epochs):
     epoch_start_time = time.time()
@@ -322,13 +324,17 @@ for epoch in range(num_epochs):
         if avg_val_loss  < best_val_loss:
             best_val_loss = avg_val_loss 
             patience_counter = 0  # Reset the counter when improvement occurs
+            # save best model weights
+            best_model_weights = copy.deepcopy(model.state_dict())
         else:
             patience_counter += 1
             if patience_counter >= patience:
                 print(f"Early stopping at epoch {epoch + 1}. Best validation loss: {best_val_loss:.4f}")
+                # restore best model
+                model.load_state_dict(best_model_weights)
                 break  # Stop training
         # update learning rate using scheduler
-        scheduler.step(val_loss)
+        scheduler.step(avg_val_loss)
 
     if not skip_epoch_stats:
         print(f'Epoch [{epoch + 1}/{num_epochs}] | Time: {((time.time() - epoch_start_time)/60):.2f} min')
@@ -340,23 +346,23 @@ for epoch in range(num_epochs):
 
     print('Total Training Time: %.2f min' % ((time.time() - start_time)/60))
 
-    if plot_losses_path is not None:
-        plt.figure()
-        plt.plot(log_dict['train_loss_per_epoch'], '.-', label='Total train loss')
-        plt.plot(log_dict['train_ce'], '.-', label='CE train loss')
-        plt.plot(log_dict['train_dice'], '.-', label='Dice train loss')
+if plot_losses_path is not None:
+    plt.figure()
+    plt.plot(log_dict['train_loss_per_epoch'], '.-', label='Total train loss')
+    plt.plot(log_dict['train_ce'], '.-', label='CE train loss')
+    plt.plot(log_dict['train_dice'], '.-', label='Dice train loss')
 
-        plt.plot(log_dict['val_loss_per_epoch'], '.-', label='Total val loss')
-        plt.plot(log_dict['val_ce'], '.-', label='CE val loss')
-        plt.plot(log_dict['val_dice'], '.-', label='Dice val loss')
+    plt.plot(log_dict['val_loss_per_epoch'], '.-', label='Total val loss')
+    plt.plot(log_dict['val_ce'], '.-', label='CE val loss')
+    plt.plot(log_dict['val_dice'], '.-', label='Dice val loss')
 
-        plt.xlabel('Epoch')
-        plt.ylabel('Loss')
-        plt.legend()
-        plt.savefig(f'{plot_losses_path}', dpi=300, bbox_inches='tight', pad_inches=0.1)  
+    plt.xlabel('Epoch')
+    plt.ylabel('Loss')
+    plt.legend()
+    plt.savefig(f'{plot_losses_path}', dpi=300, bbox_inches='tight', pad_inches=0.1)  
 
-    if save_model_path is not None:
-        torch.save(model, save_model_path)
+if save_model_path is not None:
+    torch.save(model, save_model_path)
 
 
 ### testing
