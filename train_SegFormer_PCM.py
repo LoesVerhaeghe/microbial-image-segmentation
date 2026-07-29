@@ -1,7 +1,6 @@
 '''
-This code finetunes the SegFormer model 
-to segment microscopic images of activated sludge into background, filament and flocs
-it does use only the PCM images (in order to compare this model to the paper results)
+This code tries to copy the SegFormer from https://github.com/SYUCT-InfoEng/PCM_data/tree/main 
+to get similar metrics scores
 '''
 
 import torch
@@ -17,6 +16,7 @@ import time
 import matplotlib.pyplot as plt
 from tifffile import imread
 import copy 
+from archive.lovasz_losses import lovasz_softmax
 
 class SegmentationDatasetPCM(Dataset):
     def __init__(self, image_dir, mask_dir, transform=None):
@@ -53,70 +53,40 @@ class SegmentationDatasetPCM(Dataset):
         label = label.long()
 
         return image, label
-
+import cv2
 ##  horizontal and vertical flipping and rotation only to train dataset
 train_transform_PCM = A.Compose([
     # ---- scale robustness ----
-    A.OneOf([
-        A.RandomScale(scale_limit=(-0.6, -0.2)),
-        A.RandomScale(scale_limit=(0.0, 0.3)),
-    ], p=0.7),
+    A.RandomScale(scale_limit=(-0.5, 1), interpolation=cv2.INTER_LINEAR, p=1.0,),
 
-    A.PadIfNeeded(min_height=700, min_width=700),
-    A.RandomCrop(512, 512),
+    A.PadIfNeeded(min_height=1024, min_width=1024, border_mode=cv2.BORDER_CONSTANT, value=0, mask_value=0, p=1.0,),
+    A.RandomCrop(1024, 1024, p=1),
 
     # ---- geometry ----
     A.HorizontalFlip(p=0.5),
-    A.VerticalFlip(p=0.5),
-    A.RandomRotate90(p=0.5),
-    A.Affine(scale=(0.9,1.1), rotate=(-10,10), shear=(-5,5), p=0.3),
 
     # ---- microscopy realism ----
-    A.OneOf([
-        A.GaussianBlur(blur_limit=3),
-        A.MotionBlur(blur_limit=3),
-    ], p=0.4),
-
-    A.RandomBrightnessContrast(brightness_limit=(-0.1,0.1), p=0.4),
-    A.RandomGamma(p=0.3),
-
-    # ---- slight resolution degradation ----
-    A.Downscale(scale_range=[0.75,0.9], p=0.4),
+    A.ColorJitter(
+        brightness=0.4,
+        contrast=0.4,
+        saturation=0.4,
+        hue=0,
+        p=1.0,
+    ),
 
     A.Normalize(mean=(0.485,0.456,0.406),
                 std=(0.229,0.224,0.225)),
     ToTensorV2()
 ], additional_targets={'mask': 'mask'})
 
-val_transform = A.Compose([
-    A.CenterCrop(512, 512),
-    A.Normalize(mean=(0.485, 0.456, 0.406),
-                std=(0.229, 0.224, 0.225)),
-    ToTensorV2(),
-], additional_targets={'mask': 'mask'})
 
 ## load dataset PCM
 image_dir='data/paper_PCM/train/images'
 mask_dir='data/paper_PCM/train/labels'
 
-train_dataset_full_PCM = SegmentationDatasetPCM(image_dir, mask_dir, transform=train_transform_PCM)
-val_dataset = SegmentationDatasetPCM(image_dir, mask_dir, transform=val_transform)
+train_dataset_PCM = SegmentationDatasetPCM(image_dir, mask_dir, transform=train_transform_PCM)
 
-dataset_size = len(train_dataset_full_PCM)
-indices = list(range(dataset_size))
-
-np.random.seed(25)      # for reproducibility
-np.random.shuffle(indices)
-
-split = int(0.90 * dataset_size)
-train_indices = indices[:split]
-val_indices = indices[split:]
-
-train_dataset_PCM = Subset(train_dataset_full_PCM, train_indices)
-val_dataset = Subset(val_dataset, val_indices)
-
-train_loader = DataLoader(train_dataset_PCM, batch_size=8, num_workers=2, shuffle=True, pin_memory=True, drop_last=True)
-val_loader = DataLoader(val_dataset, batch_size=8,  num_workers=2, shuffle=False, pin_memory=True)
+train_loader = DataLoader(train_dataset_PCM, batch_size=2, num_workers=4, shuffle=True, pin_memory=True, drop_last=True)
 
 # Move model to GPU
 torch.cuda.set_device(3) 
@@ -127,49 +97,48 @@ torch.manual_seed(25)
 ## load model
 num_classes = 3
 model = smp.Segformer(
-    encoder_name="mit_b1",             
+    encoder_name="mit_b3",             
     encoder_weights='imagenet',   
-    decoder_segmentation_channels=128, # channels in decoder, can tune
+    decoder_segmentation_channels=768, # channels in decoder, can tune
     in_channels=3,                      
     classes=num_classes,               
     activation=None,                   
     upsampling=4                      # final upsampling factor
 )
 
-#define a mixed loss fct
+
+# use simple Cross entropy loss 
 class MixedLoss(nn.Module):
-    def __init__(self, coef_ce=0.5, coef_dice=0.5, device=device):
+    def __init__(self, coef_ce=2, coef_lovasz=3, device=device):
         super().__init__()
-        class_weights = torch.tensor([0.05, 0.35, 0.6], dtype=torch.float32).to(device) # low frequency -> higher weight
-        self.ce = nn.CrossEntropyLoss(weight=class_weights) # quantifies how far off the model's predictions are from the true labels, weighted to account for class imbalance
-        self.dice = smp.losses.DiceLoss(mode="multiclass") # area of overlap / area of union
+        self.ce = nn.CrossEntropyLoss() # quantifies how far off the model's predictions are from the true labels, weighted to account for class imbalance
         self.coef_ce = coef_ce
-        self.coef_dice=coef_dice
+        self.coef_lovasz=coef_lovasz
 
     def forward(self, logits, labels):
         # logits: [B,C,H,W], labels: [B,H,W]
         ce_loss = self.ce(logits, labels)
-        dice_loss = self.dice(logits, labels)
+        lovasz_loss = lovasz_softmax(logits, labels)
 
-        loss = self.coef_ce * ce_loss  + self.coef_dice*dice_loss
-        return loss, ce_loss, dice_loss
+        loss = self.coef_ce * ce_loss  + self.coef_lovasz*lovasz_loss
+        return loss, ce_loss, lovasz_loss
 
 criterion = MixedLoss()
+
 
 # Optimizer and LR Scheduler
 # beta1: smooth direction of learning, beta2: smooth scaling of step size, 
 # weight decay: regularization to prevent overfitting, penalize large weights
-optimizer = torch.optim.AdamW(model.parameters(), lr=6e-5, betas=(0.9,0.999), weight_decay=0.01) 
+optimizer = torch.optim.AdamW(model.parameters(), lr=0.00006, betas=(0.9,0.999), weight_decay=0.01) 
 
-num_epochs = 300
+num_epochs = 300 # 60 000 iteration 
 
-scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+scheduler = torch.optim.lr_scheduler.PolynomialLR(
     optimizer,
-    factor=0.5,
-    patience=5
+    total_iters=num_epochs,   
+    power=2.0,
 )
 
-patience = 20
 skip_epoch_stats= False
 plot_losses_path='outputs/losses_PCMonly'
 save_model_path = 'outputs/trained_SegFormer_PCMonly.pt'
@@ -177,100 +146,38 @@ save_model_path = 'outputs/trained_SegFormer_PCMonly.pt'
 # --------------------------------------------------------
 # Training Loop
 model.to(device)
-log_dict = {'train_loss_per_epoch': [], 
-            'train_ce' : [], 
-            'train_dice' : [],
-            'val_loss_per_epoch': [],
-            'val_ce' : [],
-            'val_dice' : [] }
+log_dict = {'train_loss_per_epoch': []}
 start_time = time.time()
-best_val_loss = float('inf')
-patience_counter = 0
-best_model_weights = copy.deepcopy(model.state_dict())
 
 for epoch in range(num_epochs):
     epoch_start_time = time.time()
     model.train()
     train_loss = 0  # Initialize epoch loss
-    train_sum_ce_loss = 0
-    train_sum_dice_loss = 0
     for images, masks in train_loader:
         images, masks = images.to(device), masks.to(device)
         
         optimizer.zero_grad()
         outputs = model(images)
-        loss, ce_loss, dice_loss = criterion(outputs, masks)       
+        loss, ce_loss, lovasz_loss = criterion(outputs, masks)       
         loss.backward()
         optimizer.step()
         
         train_loss += loss.item()
-        train_sum_ce_loss += ce_loss.item()
-        train_sum_dice_loss += dice_loss.item()
 
     avg_train_loss = train_loss / len(train_loader) # train loss for this epoch
-    avg_ce_loss = train_sum_ce_loss / len(train_loader)
-    avg_dice_loss = train_sum_dice_loss / len(train_loader)
     log_dict['train_loss_per_epoch'].append(avg_train_loss)
-    log_dict['train_ce'].append(avg_ce_loss)
-    log_dict['train_dice'].append(avg_dice_loss)
 
-    avg_val_loss = float('nan') # Use NaN if no validation
-    if val_loader is not None:
-        model.eval()
-        val_loss = 0
-        val_sum_ce_loss = 0
-        val_sum_dice_loss = 0
-        with torch.no_grad():
-            for images, masks in val_loader:
-                images, masks = images.to(device), masks.to(device)
-                outputs = model(images)
-                loss, ce_loss, dice_loss=criterion(outputs, masks)
-                val_loss += loss.item()
-                val_sum_ce_loss += ce_loss.item()
-                val_sum_dice_loss += dice_loss.item()
-
-        avg_val_loss= val_loss / len(val_loader) # val loss for this epoch
-        avg_val_ce_loss= val_sum_ce_loss / len(val_loader) # val loss for this epoch
-        avg_val_dice_loss= val_sum_dice_loss / len(val_loader) # val loss for this epoch
-        log_dict['val_loss_per_epoch'].append(avg_val_loss)
-        log_dict['val_ce'].append(avg_val_ce_loss)
-        log_dict['val_dice'].append(avg_val_dice_loss)
-
-        if avg_val_loss  < best_val_loss:
-            best_val_loss = avg_val_loss 
-            patience_counter = 0  # Reset the counter when improvement occurs
-            # save best model weights
-            best_model_weights = copy.deepcopy(model.state_dict())
-        else:
-            patience_counter += 1
-            if patience_counter >= patience:
-                print(f"Early stopping at epoch {epoch + 1}. Best validation loss: {best_val_loss:.4f}")
-                # restore best model
-                model.load_state_dict(best_model_weights)
-                break  # Stop training
-        # update learning rate using scheduler
-        scheduler.step(avg_val_loss)
+    scheduler.step()
 
     if not skip_epoch_stats:
         print(f'Epoch [{epoch + 1}/{num_epochs}] | Time: {((time.time() - epoch_start_time)/60):.2f} min')
         print(f'  Train Loss: Total={avg_train_loss:.4f}')
-        if val_loader is not None:
-            print(f'  Val Loss  : Total={avg_val_loss:.4f}')
-        else:
-            print()
 
     print('Total Training Time: %.2f min' % ((time.time() - start_time)/60))
 
 if plot_losses_path is not None:
     plt.figure()
     plt.plot(log_dict['train_loss_per_epoch'], '.-', label='Total train loss')
-    plt.plot(log_dict['train_ce'], '.-', label='CE train loss')
-    plt.plot(log_dict['train_dice'], '.-', label='Dice train loss')
-
-    plt.plot(log_dict['val_loss_per_epoch'], '.-', label='Total val loss')
-    plt.plot(log_dict['val_ce'], '.-', label='CE val loss')
-    plt.plot(log_dict['val_dice'], '.-', label='Dice val loss')
-
     plt.xlabel('Epoch')
     plt.ylabel('Loss')
     plt.legend()

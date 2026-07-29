@@ -1,18 +1,3 @@
-
-# IoU
-# mIoU
-# accuracy
-# precision
-# recall
-# f1
-
-
-
-# per class: IoU, precission, recall, f1, AUC
-
-# average: mIoU, accuracy, FLOPs(G), Params(M), inference time/s
-
-
 import os
 import time
 import numpy as np
@@ -76,9 +61,10 @@ class SegmentationDatasetPCM(Dataset):
 
         return image, label
 
-
+import cv2
 val_transform = A.Compose([
-    A.CenterCrop(512, 512),
+    A.PadIfNeeded(min_height=1024, min_width=1024, border_mode=cv2.BORDER_CONSTANT, value=0, mask_value=0, p=1.0,),
+    A.CenterCrop(1024, 1024),
     A.Normalize(mean=(0.485, 0.456, 0.406),
                 std=(0.229, 0.224, 0.225)),
     ToTensorV2(),
@@ -115,7 +101,7 @@ all_labels = []
 # Evaluation
 #############################################
 
-torch.cuda.set_device(2) 
+torch.cuda.set_device(3) 
 torch.set_num_threads(4)
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
