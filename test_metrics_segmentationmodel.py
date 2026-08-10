@@ -25,11 +25,10 @@ from thop import profile
 # Dataset
 #############################################
 
-class SegmentationDatasetPCM(Dataset):
-    def __init__(self, image_dir, mask_dir, transform=None):
+class TestSegmentationDatasetPCM(Dataset):
+    def __init__(self, image_dir, mask_dir):
         self.image_dir = image_dir
         self.mask_dir = mask_dir
-        self.transform = transform
         self.images = sorted(os.listdir(image_dir))
         self.masks = sorted(os.listdir(mask_dir))
 
@@ -37,7 +36,7 @@ class SegmentationDatasetPCM(Dataset):
         return len(self.images)
 
     def __getitem__(self, idx):
-        image = Image.open(os.path.join(self.image_dir, self.images[idx])).convert("RGB")
+        image_np = np.array(Image.open(os.path.join(self.image_dir, self.images[idx])).convert("RGB"))
         mask = Image.open(os.path.join(self.mask_dir, self.masks[idx])).convert("RGB")
         mask = np.array(mask)
 
@@ -50,31 +49,83 @@ class SegmentationDatasetPCM(Dataset):
               (mask[:, :, 1] == 128) &
               (mask[:, :, 2] == 0)] = 2 # green is filament
 
-        if self.transform is not None:
-            augmented = self.transform(image=np.array(image), mask=label)
-            image = augmented["image"]
-            label = augmented["mask"]
+        return image_np, label
 
-        # Albumentations already returns tensors if ToTensorV2 is used
-        image = image.float()
-        label = label.long()
-
-        return image, label
-
-import cv2
 val_transform = A.Compose([
-    A.PadIfNeeded(min_height=1024, min_width=1024, border_mode=cv2.BORDER_CONSTANT, value=0, mask_value=0, p=1.0,),
-    A.CenterCrop(1024, 1024),
     A.Normalize(mean=(0.485, 0.456, 0.406),
                 std=(0.229, 0.224, 0.225)),
     ToTensorV2(),
 ], additional_targets={'mask': 'mask'})
 
+def predict_full_image(model, image_np, device, val_transform=val_transform, tile_size=512, overlap=32, num_classes=3):
+    model.eval()
+
+    stride = tile_size - overlap
+    H, W, _ = image_np.shape
+
+    prob_map = np.zeros((num_classes, H, W), dtype=np.float32)
+    count_map = np.zeros((H, W), dtype=np.float32)
+
+    for y in range(0, H, stride):
+        for x in range(0, W, stride):
+
+            tile = image_np[y:y+tile_size, x:x+tile_size]
+
+            h_tile, w_tile = tile.shape[:2]
+
+            # pad if at border
+            if h_tile < tile_size or w_tile < tile_size:
+                pad_img = np.zeros((tile_size, tile_size, 3), dtype=tile.dtype)
+                pad_img[:h_tile, :w_tile] = tile
+                tile = pad_img
+
+            # transform
+            augmented = val_transform(image=tile)
+            tile_tensor = augmented["image"].unsqueeze(0).to(device)
+
+            with torch.no_grad():
+                output = model(tile_tensor)
+                probs = torch.softmax(output, dim=1)[0].cpu().numpy()
+
+            probs = probs[:, :h_tile, :w_tile]
+
+            prob_map[:, y:y+h_tile, x:x+w_tile] += probs
+            count_map[y:y+h_tile, x:x+w_tile] += 1
+
+    prob_map /= count_map # (3,H,W)
+    #final_mask = np.argmax(prob_map, axis=0)
+    # -----------------------------------
+    # threshold-based classification
+    # -----------------------------------
+
+    bg_prob = prob_map[0]
+    floc_prob = prob_map[1]
+    filament_prob = prob_map[2]
+
+    # start with background
+    final_mask = np.zeros((H, W), dtype=np.uint8)
+
+    floc_pixels = floc_prob >= 0.79279387
+    filament_pixels = filament_prob >= 0.6926654
+
+    # assign flocs
+    final_mask[floc_pixels] = 1
+
+    # assign filaments
+    final_mask[filament_pixels] = 2
+
+    # resolve pixels where both pass
+    both = floc_pixels & filament_pixels
+
+    final_mask[both & (floc_prob >= filament_prob)] = 1
+    final_mask[both & (filament_prob > floc_prob)] = 2
+
+    return prob_map, final_mask
 
 test_image_dir='data/paper_PCM/test/images'
 test_mask_dir='data/paper_PCM/test/labels'
 
-test_dataset = SegmentationDatasetPCM(test_image_dir, test_mask_dir, transform=val_transform)
+test_dataset = TestSegmentationDatasetPCM(test_image_dir, test_mask_dir)
 test_loader = DataLoader(test_dataset, batch_size=1, num_workers=1, shuffle=False, pin_memory=True, drop_last=False)
 
 #############################################
@@ -105,7 +156,7 @@ torch.cuda.set_device(3)
 torch.set_num_threads(4)
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-saved_model_path = 'outputs/trained_SegFormer_PCMonly.pt'
+saved_model_path = 'outputs/trained_SegFormer_v3.pt'
 model = torch.load(saved_model_path, map_location=device)
 
 model.to(device)
@@ -114,14 +165,11 @@ model.eval()
 times = []
 
 with torch.no_grad():
-    for images, masks in test_loader:
-
-        images = images.to(device)
-        masks = masks.to(device)
+    for image_np, mask in test_loader:
 
         start = time.perf_counter()
 
-        outputs = model(images)
+        prob_map, final_mask = predict_full_image(model, image_np[0].numpy(), device, val_transform=val_transform, tile_size=1024, overlap=64, num_classes=3)
 
         if torch.cuda.is_available():
             torch.cuda.synchronize()
@@ -129,15 +177,12 @@ with torch.no_grad():
         end = time.perf_counter()
         times.append(end - start)
 
-        probs = torch.softmax(outputs, dim=1)
-        preds = torch.argmax(probs, dim=1)[0]
-
         #####################################
         # Confusion matrix
         #####################################
 
-        gt = masks.cpu().numpy().flatten()
-        pred = preds.cpu().numpy().flatten()
+        gt = mask.numpy().flatten()
+        pred = final_mask.flatten()
 
         confmat += confusion_matrix(
             gt,
@@ -150,10 +195,7 @@ with torch.no_grad():
         #####################################
         # (batch, classes, H, W) -> (number_of_pixels, classes)
         all_probs.append(
-            probs.permute(0,2,3,1) 
-            .reshape(-1, NUM_CLASSES)
-            .cpu()
-            .numpy()
+            np.transpose(prob_map, (1,2,0)).reshape(-1, NUM_CLASSES) #(H,W,3)
         )
 
         all_labels.append(gt)
@@ -228,7 +270,7 @@ print(f"Inference time    : {np.mean(times):.5f} s/image")
 # FLOPs & Params
 #############################################
 
-dummy = torch.randn(1,3,512,512).to(device)
+dummy = torch.randn(1,3,1024,1024).to(device)
 
 flops, params = profile(
     model,
