@@ -86,12 +86,12 @@ class SegmentationDatasetPilEAUte(Dataset):
 train_transform_PCM = A.Compose([
     # ---- scale robustness ----
     A.OneOf([
-        A.RandomScale(scale_limit=(-0.6, -0.2)),
+        A.RandomScale(scale_limit=(-0.3, 0)),
         A.RandomScale(scale_limit=(0.0, 0.3)),
     ], p=0.7),
 
-    A.PadIfNeeded(min_height=700, min_width=700),
-    A.RandomCrop(512, 512),
+    A.PadIfNeeded(min_height=1024, min_width=1024),
+    A.RandomCrop(1024, 1024),
 
     # ---- geometry ----
     A.HorizontalFlip(p=0.5),
@@ -109,7 +109,7 @@ train_transform_PCM = A.Compose([
     A.RandomGamma(p=0.3),
 
     # ---- slight resolution degradation ----
-    A.Downscale(scale_range=[0.75,0.9], p=0.4),
+    A.Downscale(scale_range=[0.8,0.95], p=0.4),
 
     A.Normalize(mean=(0.485,0.456,0.406),
                 std=(0.229,0.224,0.225)),
@@ -119,12 +119,12 @@ train_transform_PCM = A.Compose([
 train_transform_pilEAUte = A.Compose([
     # ---- scale robustness ----
     A.OneOf([
-        A.RandomScale(scale_limit=(-0.6, -0.2)),
+        A.RandomScale(scale_limit=(-0.3, 0)),
         A.RandomScale(scale_limit=(0.0, 0.3)),
     ], p=0.7),
 
-    A.PadIfNeeded(min_height=700, min_width=700),
-    A.RandomCrop(512, 512),
+    A.PadIfNeeded(min_height=1024, min_width=1024),
+    A.RandomCrop(1024, 1024),
 
     # ---- geometry ----
     A.HorizontalFlip(p=0.5),
@@ -142,7 +142,7 @@ train_transform_pilEAUte = A.Compose([
     A.RandomGamma(p=0.3),
 
     # ---- slight resolution degradation ----
-    A.Downscale(scale_range=[0.65,0.9], p=0.5), # larger scale
+    A.Downscale(scale_range=[0.8,0.95], p=0.5), # larger scale
 
     A.Normalize(mean=(0.485,0.456,0.406),
                 std=(0.229,0.224,0.225)),
@@ -150,7 +150,8 @@ train_transform_pilEAUte = A.Compose([
 ], additional_targets={'mask': 'mask'})
 
 val_transform = A.Compose([
-    A.CenterCrop(512, 512),
+    A.PadIfNeeded(min_height=1024, min_width=1024),
+    A.CenterCrop(1024, 1024),
     A.Normalize(mean=(0.485, 0.456, 0.406),
                 std=(0.229, 0.224, 0.225)),
     ToTensorV2(),
@@ -158,52 +159,63 @@ val_transform = A.Compose([
 
 
 ## load dataset PCM
-image_dir='data/paper_PCM/train/images'
-mask_dir='data/paper_PCM/train/labels'
+image_dir_PCM='data/paper_PCM/train/images'
+mask_dir_PCM='data/paper_PCM/train/labels'
 
-train_dataset_full_PCM = SegmentationDatasetPCM(image_dir, mask_dir, transform=train_transform_PCM)
-val_dataset = SegmentationDatasetPCM(image_dir, mask_dir, transform=val_transform)
+train_dataset_full_PCM = SegmentationDatasetPCM(image_dir_PCM, mask_dir_PCM, transform=train_transform_PCM)
+val_dataset_PCM = SegmentationDatasetPCM(image_dir_PCM, mask_dir_PCM, transform=val_transform)
 
-dataset_size = len(train_dataset_full_PCM)
-indices = list(range(dataset_size))
+dataset_size_PCM = len(train_dataset_full_PCM)
+indices_PCM = list(range(dataset_size_PCM))
 
 np.random.seed(25)      # for reproducibility
-np.random.shuffle(indices)
+np.random.shuffle(indices_PCM)
 
-split = int(0.90 * dataset_size)
-train_indices = indices[:split]
-val_indices = indices[split:]
+split_PCM = int(0.90 * dataset_size_PCM)
+train_indices_PCM = indices_PCM[:split_PCM]
+val_indices_PCM = indices_PCM[split_PCM:]
 
-train_dataset_PCM = Subset(train_dataset_full_PCM, train_indices)
-val_dataset = Subset(val_dataset, val_indices)
+train_dataset_PCM = Subset(train_dataset_full_PCM, train_indices_PCM)
+val_dataset_PCM = Subset(val_dataset_PCM, val_indices_PCM)
 
 # load dataset pilEAUte
-image_dir='data/pilEAUte/finetuned_train_im_masks/images'
-mask_dir='data/pilEAUte/finetuned_train_im_masks/masks'
+image_dir_pilEAUte='data/pilEAUte/finetuned_train_im_masks/images'
+mask_dir_pilEAUte='data/pilEAUte/finetuned_train_im_masks/masks'
 
-train_dataset_pilEAUte = SegmentationDatasetPilEAUte(image_dir, mask_dir, transform=train_transform_pilEAUte)
+train_dataset_pilEAUte = SegmentationDatasetPilEAUte(image_dir_pilEAUte, mask_dir_pilEAUte, transform=train_transform_pilEAUte)
+val_dataset_pilEAUte = SegmentationDatasetPilEAUte(image_dir_pilEAUte, mask_dir_pilEAUte, transform=val_transform)
+
+dataset_size_pilEAUte = len(train_dataset_pilEAUte)
+indices_pilEAUte = list(range(dataset_size_pilEAUte))
+
+split_pilEAUte = int(0.80 * dataset_size_pilEAUte)
+train_indices_pilEAUte = indices_pilEAUte[:split_pilEAUte]
+val_indices_pilEAUte = indices_pilEAUte[split_pilEAUte:]
+
+train_dataset_pilEAUte = Subset(train_dataset_pilEAUte, train_indices_pilEAUte)
+val_dataset_pilEAUte = Subset(val_dataset_pilEAUte, val_indices_pilEAUte)
 
 ### combine dataset
-combined_dataset = ConcatDataset([train_dataset_PCM, train_dataset_pilEAUte])
+combined_train_dataset = ConcatDataset([train_dataset_PCM, train_dataset_pilEAUte])
+combined_val_dataset = ConcatDataset([val_dataset_PCM, val_dataset_pilEAUte])
 
-# PCM = 500 samples, PilEAUte = 8 samples
 pcm_weights = [1.0] * len(train_dataset_PCM)
 pileaute_weights = [10.0] * len(train_dataset_pilEAUte)  # oversample factor
 
-weights = pcm_weights + pileaute_weights #508 weights
+weights = pcm_weights + pileaute_weights 
 
 sampler = WeightedRandomSampler(
     weights=weights,
-    num_samples=2*len(weights),  # -> Each epoch will consist of 1016 randomly sampled images.
+    num_samples=2*len(weights),  
     replacement=True # because we only crop out a small part of the image the same image can be used twice as sample
 )
 
-train_loader = DataLoader(combined_dataset, batch_size=8, num_workers=2, shuffle=False, sampler=sampler, pin_memory=True, drop_last=True)
-val_loader = DataLoader(val_dataset, batch_size=8,  num_workers=2, shuffle=False, pin_memory=True)
+train_loader = DataLoader(combined_train_dataset, batch_size=8, num_workers=2, shuffle=False, sampler=sampler, pin_memory=True, drop_last=True)
+val_loader = DataLoader(combined_val_dataset, batch_size=8,  num_workers=2, shuffle=False, pin_memory=True)
 
 
 # Move model to GPU
-torch.cuda.set_device(3) 
+torch.cuda.set_device(0) 
 torch.set_num_threads(4)
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 torch.manual_seed(25)
@@ -223,11 +235,11 @@ model = smp.Segformer(
 
 #define a mixed loss fct
 class MixedLoss(nn.Module):
-    def __init__(self, coef_ce=0.5, coef_dice=0.5, device=device):
+    def __init__(self, coef_ce=0.4, coef_dice=0.6, device=device):
         super().__init__()
-        class_weights = torch.tensor([0.05, 0.35, 0.6], dtype=torch.float32).to(device) # low frequency -> higher weight
+        class_weights = torch.tensor([0.05, 0.30, 0.65], dtype=torch.float32).to(device) # low frequency -> higher weight
         self.ce = nn.CrossEntropyLoss(weight=class_weights) # quantifies how far off the model's predictions are from the true labels, weighted to account for class imbalance
-        self.dice = smp.losses.DiceLoss(mode="multiclass") # area of overlap / area of union
+        self.dice = smp.losses.DiceLoss(mode="multiclass", classes=[1,2]) # area of overlap / area of union
         self.coef_ce = coef_ce
         self.coef_dice=coef_dice
 
@@ -244,20 +256,20 @@ criterion = MixedLoss()
 # Optimizer and LR Scheduler
 # beta1: smooth direction of learning, beta2: smooth scaling of step size, 
 # weight decay: regularization to prevent overfitting, penalize large weights
-optimizer = torch.optim.AdamW(model.parameters(), lr=6e-5, betas=(0.9,0.999), weight_decay=0.01) 
+optimizer = torch.optim.AdamW(model.parameters(), lr=0.00024, betas=(0.9,0.999), weight_decay=0.01) 
 
 num_epochs = 300
 
-scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+scheduler = torch.optim.lr_scheduler.PolynomialLR(
     optimizer,
-    factor=0.5,
-    patience=5
+    total_iters=num_epochs,   
+    power=2.0,
 )
 
 patience = 20
 skip_epoch_stats= False
-plot_losses_path='outputs/losses'
-save_model_path = 'outputs/trained_SegFormer.pt'
+plot_losses_path='outputs/losses_v3.png'
+save_model_path = 'outputs/trained_SegFormer_v3.pt'
 
 # --------------------------------------------------------
 # Training Loop
@@ -333,8 +345,8 @@ for epoch in range(num_epochs):
                 # restore best model
                 model.load_state_dict(best_model_weights)
                 break  # Stop training
-        # update learning rate using scheduler
-        scheduler.step(avg_val_loss)
+
+    scheduler.step()
 
     if not skip_epoch_stats:
         print(f'Epoch [{epoch + 1}/{num_epochs}] | Time: {((time.time() - epoch_start_time)/60):.2f} min')
@@ -364,86 +376,3 @@ if plot_losses_path is not None:
 if save_model_path is not None:
     torch.save(model, save_model_path)
 
-
-### testing
-
-test_image_dir='data/paper_PCM/test/images'
-test_mask_dir='data/paper_PCM/test/labels'
-
-test_dataset = SegmentationDatasetPCM(test_image_dir, test_mask_dir, transform=val_transform)
-test_loader = DataLoader(test_dataset, batch_size=1, num_workers=1, shuffle=False, pin_memory=True, drop_last=False)
-
-save_model_path = 'outputs/trained_SegFormer.pt'
-model = torch.load(save_model_path, map_location=device)
-
-model.eval()
-
-COLORS = {
-    0: [0, 0, 0],        # background
-    1: [255, 0, 0],      # class 1 - red
-    2: [0, 255, 0],      # class 2 - green
-}
-
-#### plot some masks for evaluation
-
-def decode_mask(mask):
-    """Convert [H, W] class mask → RGB image"""
-    h, w = mask.shape
-    rgb = np.zeros((h, w, 3), dtype=np.uint8)
-    for cls, color in COLORS.items():
-        rgb[mask == cls] = color
-    return rgb
-
-with torch.no_grad():
-    for idx in range(len(test_dataset)):
-        image, mask = test_dataset[idx]
-
-        # Add batch dimension
-        image = image.unsqueeze(0).to(device)  # [1, 3, H, W]
-        mask = mask.to(device)    # [H, W]
-
-        # Forward pass
-        output = model(image)  # [1, 3, H, W]
-
-        # Convert logits to probabilities
-        probs = torch.softmax(output, dim=1)
-        pred_mask = torch.argmax(probs, dim=1)[0]   # [H, W]
-
-        # Move tensors to CPU for visualization
-        img_np = image[0].permute(1,2,0).cpu().numpy()
-        mask_np = mask.cpu().numpy()
-        pred_np = pred_mask.cpu().numpy()
-        
-        mean = np.array([0.485, 0.456, 0.406])
-        std  = np.array([0.229, 0.224, 0.225])
-        img_np = (img_np * std) + mean
-        img_np = np.clip(img_np, 0, 1)
-
-        mask_rgb   = decode_mask(mask_np)
-        pred_rgb = decode_mask(pred_np)
-
-        # Plot original, true mask, and predicted mask
-        plt.figure(figsize=(12,4))
-        # Overlay ground truth
-        plt.subplot(1,3,1)
-        plt.imshow(img_np)
-        plt.title("Image")
-        plt.axis('off')
-
-        # Overlay predicted mask
-        plt.subplot(1,3,2)
-        plt.imshow(mask_rgb)
-        plt.title("Ground truth")
-        plt.axis('off')
-
-        # Overlay predicted mask
-        plt.subplot(1,3,3)
-        plt.imshow(pred_rgb)
-        plt.title("Predicted Mask")
-        plt.axis('off')
-
-        plt.savefig(f'outputs/example_masks_PCM/fig{idx}', dpi=300)
-        plt.close()
-        # break after a few images
-        if idx >= 10:
-            break
