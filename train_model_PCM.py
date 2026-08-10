@@ -1,0 +1,188 @@
+'''
+This code tries to copy the SegFormer from https://github.com/SYUCT-InfoEng/PCM_data/tree/main 
+to get similar metrics scores
+'''
+
+import torch
+import torch.nn as nn
+import numpy as np
+import albumentations as A
+from albumentations.pytorch import ToTensorV2
+from torch.utils.data import DataLoader, Dataset, Subset
+import segmentation_models_pytorch as smp
+from PIL import Image
+import os
+import time
+import matplotlib.pyplot as plt
+from tifffile import imread
+import copy 
+from archive.lovasz_losses import lovasz_softmax
+
+class SegmentationDatasetPCM(Dataset):
+    def __init__(self, image_dir, mask_dir, transform=None):
+        self.image_dir = image_dir
+        self.mask_dir = mask_dir
+        self.transform = transform
+        self.images = sorted(os.listdir(image_dir))
+        self.masks = sorted(os.listdir(mask_dir))
+
+    def __len__(self):
+        return len(self.images)
+
+    def __getitem__(self, idx):
+        image = Image.open(os.path.join(self.image_dir, self.images[idx])).convert("RGB")
+        mask = Image.open(os.path.join(self.mask_dir, self.masks[idx])).convert("RGB")
+        mask = np.array(mask)
+
+        # --- COLOR → CLASS MAP ---
+        label = np.zeros((mask.shape[0], mask.shape[1]), dtype=np.int64)
+        label[(mask[:, :, 0] == 128) &
+              (mask[:, :, 1] == 0) &
+              (mask[:, :, 2] == 0)] = 1 # red is floc
+        label[(mask[:, :, 0] == 0) &
+              (mask[:, :, 1] == 128) &
+              (mask[:, :, 2] == 0)] = 2 # green is filament
+
+        if self.transform is not None:
+            augmented = self.transform(image=np.array(image), mask=label)
+            image = augmented["image"]
+            label = augmented["mask"]
+
+        # Albumentations already returns tensors if ToTensorV2 is used
+        image = image.float()
+        label = label.long()
+
+        return image, label
+import cv2
+##  horizontal and vertical flipping and rotation only to train dataset
+train_transform_PCM = A.Compose([
+    # ---- scale robustness ----
+    A.RandomScale(scale_limit=(-0.5, 1), interpolation=cv2.INTER_LINEAR, p=1.0,),
+
+    A.PadIfNeeded(min_height=1024, min_width=1024, border_mode=cv2.BORDER_CONSTANT, value=0, mask_value=0, p=1.0,),
+    A.RandomCrop(1024, 1024, p=1),
+
+    # ---- geometry ----
+    A.HorizontalFlip(p=0.5),
+
+    # ---- microscopy realism ----
+    A.ColorJitter(
+        brightness=0.4,
+        contrast=0.4,
+        saturation=0.4,
+        hue=0,
+        p=1.0,
+    ),
+
+    A.Normalize(mean=(0.485,0.456,0.406),
+                std=(0.229,0.224,0.225)),
+    ToTensorV2()
+], additional_targets={'mask': 'mask'})
+
+
+## load dataset PCM
+image_dir='data/paper_PCM/train/images'
+mask_dir='data/paper_PCM/train/labels'
+
+train_dataset_PCM = SegmentationDatasetPCM(image_dir, mask_dir, transform=train_transform_PCM)
+
+train_loader = DataLoader(train_dataset_PCM, batch_size=2, num_workers=4, shuffle=True, pin_memory=True, drop_last=True)
+
+# Move model to GPU
+torch.cuda.set_device(3) 
+torch.set_num_threads(4)
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+torch.manual_seed(25)
+
+## load model
+num_classes = 3
+model = smp.Segformer(
+    encoder_name="mit_b3",             
+    encoder_weights='imagenet',   
+    decoder_segmentation_channels=768, # channels in decoder, can tune
+    in_channels=3,                      
+    classes=num_classes,               
+    activation=None,                   
+    upsampling=4                      # final upsampling factor
+)
+
+
+# use simple Cross entropy loss 
+class MixedLoss(nn.Module):
+    def __init__(self, coef_ce=2, coef_lovasz=3, device=device):
+        super().__init__()
+        self.ce = nn.CrossEntropyLoss() # quantifies how far off the model's predictions are from the true labels, weighted to account for class imbalance
+        self.coef_ce = coef_ce
+        self.coef_lovasz=coef_lovasz
+
+    def forward(self, logits, labels):
+        # logits: [B,C,H,W], labels: [B,H,W]
+        ce_loss = self.ce(logits, labels)
+        lovasz_loss = lovasz_softmax(logits, labels)
+
+        loss = self.coef_ce * ce_loss  + self.coef_lovasz*lovasz_loss
+        return loss, ce_loss, lovasz_loss
+
+criterion = MixedLoss()
+
+
+# Optimizer and LR Scheduler
+# beta1: smooth direction of learning, beta2: smooth scaling of step size, 
+# weight decay: regularization to prevent overfitting, penalize large weights
+optimizer = torch.optim.AdamW(model.parameters(), lr=0.00006, betas=(0.9,0.999), weight_decay=0.01) 
+
+num_epochs = 300 # 60 000 iteration 
+
+scheduler = torch.optim.lr_scheduler.PolynomialLR(
+    optimizer,
+    total_iters=num_epochs,   
+    power=2.0,
+)
+
+skip_epoch_stats= False
+plot_losses_path='outputs/losses_PCMonly'
+save_model_path = 'outputs/trained_SegFormer_PCMonly.pt'
+
+# --------------------------------------------------------
+# Training Loop
+model.to(device)
+log_dict = {'train_loss_per_epoch': []}
+start_time = time.time()
+
+for epoch in range(num_epochs):
+    epoch_start_time = time.time()
+    model.train()
+    train_loss = 0  # Initialize epoch loss
+    for images, masks in train_loader:
+        images, masks = images.to(device), masks.to(device)
+        
+        optimizer.zero_grad()
+        outputs = model(images)
+        loss, ce_loss, lovasz_loss = criterion(outputs, masks)       
+        loss.backward()
+        optimizer.step()
+        
+        train_loss += loss.item()
+
+    avg_train_loss = train_loss / len(train_loader) # train loss for this epoch
+    log_dict['train_loss_per_epoch'].append(avg_train_loss)
+
+    scheduler.step()
+
+    if not skip_epoch_stats:
+        print(f'Epoch [{epoch + 1}/{num_epochs}] | Time: {((time.time() - epoch_start_time)/60):.2f} min')
+        print(f'  Train Loss: Total={avg_train_loss:.4f}')
+
+    print('Total Training Time: %.2f min' % ((time.time() - start_time)/60))
+
+if plot_losses_path is not None:
+    plt.figure()
+    plt.plot(log_dict['train_loss_per_epoch'], '.-', label='Total train loss')
+    plt.xlabel('Epoch')
+    plt.ylabel('Loss')
+    plt.legend()
+    plt.savefig(f'{plot_losses_path}', dpi=300, bbox_inches='tight', pad_inches=0.1)  
+
+if save_model_path is not None:
+    torch.save(model, save_model_path)
+
