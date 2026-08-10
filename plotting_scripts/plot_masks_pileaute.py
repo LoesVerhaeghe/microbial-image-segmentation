@@ -1,8 +1,10 @@
 """
-Generate and plot some masks for pilEAUte images and save them
-Also save some masks to later finetune the model on them (commented out for now)
+Generate and plot some masks for pilEAUte images and save them for visualization
+Also save some masks to later finetune the model on them
 """
 
+
+import shutil
 
 import numpy as np
 import matplotlib.pyplot as plt
@@ -13,6 +15,7 @@ from PIL import Image
 import albumentations as A
 from os import listdir
 from albumentations.pytorch import ToTensorV2
+from tifffile import imread
 
 
 def extract_image_paths_pileaute(path_to_folders, start_folder, end_folder, magnification=10):
@@ -38,7 +41,7 @@ def extract_image_paths_pileaute(path_to_folders, start_folder, end_folder, magn
 
     # Save all paths from the selected folders
     for folder in selected_folders:
-        path_to_image = f"{path_to_folders}/{folder}/basin3/{magnification}x"
+        path_to_image = f"{path_to_folders}/{folder}/basin5/{magnification}x"
         if not os.path.exists(path_to_image):  # <- skip missing folders
             continue
         images_list = sorted(listdir(path_to_image))
@@ -52,7 +55,8 @@ val_transform = A.Compose([
     ToTensorV2(),
 ], additional_targets={'mask': 'mask'})
 
-def predict_full_image(model, image_np, device, val_transform=val_transform,tile_size=512, overlap=128, num_classes=3):
+
+def predict_full_image(model, image_np, device, val_transform=val_transform, tile_size=1024, overlap=64, num_classes=3):
     model.eval()
 
     stride = tile_size - overlap
@@ -87,10 +91,36 @@ def predict_full_image(model, image_np, device, val_transform=val_transform,tile
             prob_map[:, y:y+h_tile, x:x+w_tile] += probs
             count_map[y:y+h_tile, x:x+w_tile] += 1
 
-    prob_map /= count_map
-    final_mask = np.argmax(prob_map, axis=0)
+    prob_map /= count_map # (3,H,W)
+    #final_mask = np.argmax(prob_map, axis=0)
+    # -----------------------------------
+    # threshold-based classification
+    # -----------------------------------
 
-    return final_mask
+    bg_prob = prob_map[0]
+    floc_prob = prob_map[1]
+    filament_prob = prob_map[2]
+
+    # start with background
+    final_mask = np.zeros((H, W), dtype=np.uint8)
+
+    floc_pixels = floc_prob >= 0.79279387
+    filament_pixels = filament_prob >= 0.6926654
+
+    # assign flocs
+    final_mask[floc_pixels] = 1
+
+    # assign filaments
+    final_mask[filament_pixels] = 2
+
+    # resolve pixels where both pass
+    both = floc_pixels & filament_pixels
+
+    final_mask[both & (floc_prob >= filament_prob)] = 1
+    final_mask[both & (filament_prob > floc_prob)] = 2
+
+    return prob_map, final_mask
+
 
 COLORS = {
     0: [0, 0, 0],        # background
@@ -106,7 +136,7 @@ def decode_mask(mask, COLORS):
         rgb[mask == cls] = color
     return rgb
 
-image_dir='data/pilEAUte/all_masks'
+image_dir='data/pilEAUte/all_images'
 
 image_paths= extract_image_paths_pileaute(image_dir, start_folder='2023-10-13', end_folder='2025-02-19', magnification=10)
 
@@ -120,93 +150,59 @@ model = torch.load(save_model_path, map_location=device)
 
 model.eval()
 
+indices = np.random.choice(len(image_paths), size=20, replace=False)
 
 #plot some infered mask for visual evaluation
 with torch.no_grad():
-    for idx in range(len(image_paths)):
+    for idx in indices:
         image_path = image_paths[idx]
         image_np = np.array(Image.open(image_path).convert("RGB"))
         #image_pil.save(f'outputs/masks_pileaute/{idx}_image.png')
 
-        pred_np = predict_full_image(model, image_np, device, val_transform=val_transform, tile_size=512, overlap=128, num_classes=3)
-        pred_rgb = decode_mask(pred_np, COLORS)
-        PIL_img = Image.fromarray(pred_rgb)
-        PIL_img.save(image_path)
+        pred_prob, mask_np = predict_full_image(model, image_np, device, val_transform=val_transform, tile_size=1024, overlap=64, num_classes=3)
+        pred_rgb = decode_mask(mask_np, COLORS)
+        # PIL_img = Image.fromarray(pred_rgb)
+        # PIL_img.save(image_path)
 
-        # # Plot original, predicted mask and overlay
-        # plt.figure(figsize=(12,4), dpi=500)
-        # # Overlay ground truth
-        # plt.subplot(1,3,1)
-        # plt.imshow(image_np)
-        # plt.title("Image")
-        # plt.axis('off')
+        # Plot original, predicted mask and overlay
+        plt.figure(figsize=(12,4), dpi=500)
+        # Overlay ground truth
+        plt.subplot(1,3,1)
+        plt.imshow(image_np)
+        plt.title("Image")
+        plt.axis('off')
 
-        # # Overlay predicted mask
-        # plt.subplot(1,3,2)
-        # plt.imshow(pred_rgb)
-        # plt.title("Predicted Mask")
-        # plt.axis('off')
+        # Overlay predicted mask
+        plt.subplot(1,3,2)
+        plt.imshow(pred_rgb)
+        plt.title("Predicted Mask")
+        plt.axis('off')
 
-        # # Overlay predicted mask
-        # plt.subplot(1,3,3)
-        # plt.imshow(image_np)
-        # plt.imshow(pred_rgb, alpha=0.4)
-        # plt.title("Image+predicted mask")
-        # plt.axis('off')
+        # Overlay predicted mask
+        plt.subplot(1,3,3)
+        plt.imshow(image_np)
+        plt.imshow(pred_rgb, alpha=0.4)
+        plt.title("Image+predicted mask")
+        plt.axis('off')
 
-        # plt.savefig(f'outputs/example_masks_pilEAUte/old_microscope/fig{idx}')
-
-
-
-#### generate some masks to later finetune the model on them
+        plt.savefig(f'outputs/example_masks_pilEAUte/fig{idx}')
 
 
-# val_transform_512x512 = A.Compose([
-#     A.CenterCrop(512, 512),
-#     A.Normalize(mean=(0.485, 0.456, 0.406),
-#                 std=(0.229, 0.224, 0.225)),
-#     ToTensorV2(),
-# ], additional_targets={'mask': 'mask'})
 
-# def predict_512x512_image(model, image_np, device):
-#     model.eval()
-
-#     # transform
-#     augmented = val_transform_512x512(image=image_np)
-#     augmented = augmented["image"].unsqueeze(0).to(device)
-
-#     with torch.no_grad():
-#         output = model(augmented)
-#         probs = torch.softmax(output, dim=1)[0].cpu().numpy()
-
-#     final_mask = np.argmax(probs, axis=0)
-
-#     return final_mask
-
+# #### generate some masks to later finetune the model on them
+# sample_indices = np.random.choice(len(image_paths), size=5, replace=False)
 
 # #save some images to later finetune them
 # with torch.no_grad():
-#     for idx in sample_indices:
-#         image = dataset[idx]
-#         image = image.unsqueeze(0).to(device)
-        
-#         output = model(image)
-#         probs = torch.softmax(output, dim=1)
-#         pred_mask = torch.argmax(probs, dim=1)[0]   # [H, W]
-        
-#         # Move tensors to CPU for visualization
-#         img_np = image[0].permute(1,2,0).cpu().numpy()
-#         pred_np = pred_mask.cpu().numpy()
-        
-#         mean = np.array([0.485, 0.456, 0.406])
-#         std  = np.array([0.229, 0.224, 0.225])
-#         img_np = (img_np * std) + mean
-#         img_np = np.clip(img_np, 0, 1)
+#     for i, idx in enumerate(sample_indices):
+#         image_path = image_paths[idx]
+#         print(image_path)
+#         image_np = np.array(Image.open(image_path).convert("RGB"))
 
+#         pred_np = predict_full_image(model, image_np, device, val_transform=val_transform, tile_size=512, overlap=128, num_classes=3)
 #         pred_rgb = decode_mask(pred_np, COLORS)
 
-#         pred_mask = Image.fromarray(pred_np.astype(np.uint8))
-#         pred_mask.save(f"data/pilEAUte/modeloutputs/model_output_masks/im_{idx}_masks.png")
-#         img_uint8 = (img_np * 255).astype(np.uint8)
-#         pred_img=Image.fromarray(img_uint8)
-#         pred_img.save(f"data/pilEAUte/modeloutputs/orig_images/im_{idx}.png")
+#         pred_mask = Image.fromarray(pred_rgb)
+#         pred_mask.save(f"data/pilEAUte/modeloutputs/model_output_masks/im_{i}_masks.png")
+
+#         shutil.copy(image_path, f"data/pilEAUte/modeloutputs/orig_images/im_{i}.png")
