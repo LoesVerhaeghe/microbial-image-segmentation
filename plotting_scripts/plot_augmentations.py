@@ -97,28 +97,35 @@ mask_dir='data/paper_PCM/train/labels'
 
 
 train_dataset_full = SegmentationDataset(image_dir, mask_dir, transform=train_transform)
-for idx in range(0,10):
+for idx in range(10,20):
     image, label, orig_image = train_dataset_full[idx]
 
     # Plot the images side by side
-    plt.figure(figsize=(15, 5), dpi=200)
+    plt.figure(figsize=(5, 5), dpi=100)
 
     # Original image subplot
-    plt.subplot(1, 3, 1)
+    plt.subplot(2, 2, 1)
     plt.imshow(orig_image)
     plt.title("Original Image")
     plt.axis('off')  # Turn off axis labels
 
-    # Original image subplot
-    plt.subplot(1, 3, 2)
+    # Augmented image subplot
+    plt.subplot(2, 2, 2)
     plt.imshow(image.permute(1, 2, 0))
     plt.title("Augmented Image")
     plt.axis('off')  # Turn off axis labels
 
     # Transformed image subplot
-    plt.subplot(1, 3, 3)
+    plt.subplot(2, 2, 3)
     plt.imshow(label)
-    plt.title("Transformed Image")
+    plt.title("Augmented Mask")
+    plt.axis('off')  # Turn off axis labels
+
+# Transformed image subplot
+    plt.subplot(2, 2, 4)
+    plt.imshow(image.permute(1, 2, 0))
+    plt.imshow(label, alpha=0.5)  # Overlay the mask on the image with transparency
+    plt.title("Augmented Image with Mask Overlay")
     plt.axis('off')  # Turn off axis labels
 
     # Show the plot
