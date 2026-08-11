@@ -5,7 +5,11 @@ it does use the PCM and pilEAUte segmented images
 
 it uses no validation set as hyperparameters are found
 '''
-
+import os 
+os.environ["OMP_NUM_THREADS"] = "2"
+os.environ["MKL_NUM_THREADS"] = "2"
+os.environ["OPENBLAS_NUM_THREADS"] = "2"
+os.environ["NUMEXPR_NUM_THREADS"] = "2"
 import torch
 import torch.nn as nn
 import numpy as np

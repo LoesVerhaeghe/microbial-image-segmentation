@@ -89,7 +89,7 @@ torch.cuda.set_device(3)
 torch.set_num_threads(4)
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-saved_model_path = 'outputs/trained_SegFormer_v3.pt'
+saved_model_path = 'outputs/trained_SegFormer_noVal.pt'
 model = torch.load(saved_model_path, map_location=device)
 
 model.to(device)

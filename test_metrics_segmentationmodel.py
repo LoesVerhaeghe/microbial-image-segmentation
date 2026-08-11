@@ -105,8 +105,8 @@ def predict_full_image(model, image_np, device, val_transform=val_transform, til
     # start with background
     final_mask = np.zeros((H, W), dtype=np.uint8)
 
-    floc_pixels = floc_prob >= 0.79279387
-    filament_pixels = filament_prob >= 0.6926654
+    floc_pixels = floc_prob >= 0.7814933
+    filament_pixels = filament_prob >= 0.6403097
 
     # assign flocs
     final_mask[floc_pixels] = 1
@@ -156,7 +156,7 @@ torch.cuda.set_device(3)
 torch.set_num_threads(4)
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-saved_model_path = 'outputs/trained_SegFormer_v3.pt'
+saved_model_path = 'outputs/trained_SegFormer_noVal.pt'
 model = torch.load(saved_model_path, map_location=device)
 
 model.to(device)
