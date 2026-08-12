@@ -113,6 +113,7 @@ train_transform_PCM = A.Compose([
 
     A.RandomBrightnessContrast(brightness_limit=(-0.1,0.1), p=0.4),
     A.RandomGamma(p=0.3),
+    A.ToGray(p=0.2),
 
     # ---- slight resolution degradation ----
     A.Downscale(scale_range=[0.8,0.95], p=0.4),
@@ -146,6 +147,7 @@ train_transform_pilEAUte = A.Compose([
 
     A.RandomBrightnessContrast(brightness_limit=(-0.3,0.3), p=0.5), # larger contrast
     A.RandomGamma(p=0.3),
+    A.ToGray(p=0.2),
 
     # ---- slight resolution degradation ----
     A.Downscale(scale_range=[0.8,0.95], p=0.5), # larger scale
